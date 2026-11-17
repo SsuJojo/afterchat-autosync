@@ -23,7 +23,7 @@ C:\Users\SsuJo_\Chats\
 
 | 来源 | 日常增量（转换器默认扫 `_inbox` + `_sync`） | 底档 / 一次性回填 |
 |---|---|---|
-| ChatGPT | AfterChat 自动同步 → `_sync\openai\*.md` → Amp store（与其余平台一致）；历史 zip 放 `_inbox` | 旧版官方导出（conversations.json zip）放 `_inbox` |
+| ChatGPT | AfterChat 自动同步 → `_sync\openai\*.md` → Amp store | 官方导出 zip（conversations.json）放 `_inbox` |
 | Gemini | AfterChat 自动同步 → `_sync\gemini\*.md` → Gemini CLI 原生 store | 官方 Google Takeout（`我的活动/Gemini Apps/我的活动记录.json`）：放进 `_inbox`，或 `--with-takeout` 一次性回填 `G:\我的云端硬盘\Takeout`（zip 或散装 json） |
 | Grok | AfterChat 自动同步 → `_sync\grok\*.md`（含 `grokcom`）→ Grok CLI 原生 store | grok.com 官方导出（含 prod-grok-backend.json 的 zip 或散装），放 `_inbox` |
 | 其余平台 | AfterChat 自动同步 → `_sync\<平台>\ *.md`，带 `[平台名]` 前缀统一进 Amp store | 无官方底档；浏览器访问对应站点即可增量备份 |
@@ -38,13 +38,12 @@ C:\Users\SsuJo_\Chats\
 
 **平时什么都不用做。**浏览器打开任意已适配站点（29 个平台），AfterChat 自动同步就把「上次同步之后」的新对话直接写进 `_sync\<平台>\`；两个计划任务（`deja-chat-sync` 22:30、`deja-chat-sync-noon` 12:30）自动扫 `_inbox` + `_sync`，有新文件就转换并 `deja index`。手动跑：双击 `sync.cmd` 或 `Start-ScheduledTask deja-chat-sync`。想马上搜到刚同步的对话，也直接运行 `C:\Users\SsuJo_\Chats\sync.cmd`（增量，几秒到几分钟）。
 
-ChatGPT 与其他平台一视同仁：增量由自动同步写 `_sync\openai\`，历史 zip 放 `_inbox` 即被默认扫描；若留在 Downloads，用 `--with-downloads` 回填一次。
+历史导出 zip 放 `_inbox` 即被默认扫描；若留在 Downloads，用 `--with-downloads` 回填一次。
 
 ### 一次性准备（已完成的部分）
 
 1. ✅ **Gemini 底档（2026-11-15 已完成）**：官方 Takeout 已在 `G:\我的云端硬盘\Takeout\`，此前已接入。该目录**不再日常扫**；今后拿到新 Takeout，放进 `_inbox`，或运行 `python chat2deja.py --with-takeout` 再跑 `sync.cmd` 回填。
-2. ✅ **Grok（2026-11-15 已完成）**：60 个对话已通过 AfterChat 导出 zip 接入。日常增量改由自动同步写 `_sync\grok\`（见下节）。
-3. **全平台增量**：油猴里用 AfterChat + AutoSync（安装见下节）。在任意 29 个已适配站点打开网页即自动增量同步，不用再点导出、不再产生 Downloads 文件；手动导出 / 全量导出能力仍保留，但产物落在 Downloads 后需 `--with-downloads` 回填或手动移入 `_inbox`。
+2. ✅ **Grok（2026-11-15 已完成）**：60 个对话已通过 AfterChat 导出 zip 接入。日常增量改由自动同步写 `_sync\grok\`（见下节）。3. **全平台增量**：油猴里用 AfterChat + AutoSync（安装见下节）。在任意 29 个已适配站点打开网页即自动增量同步，不用再点导出、不再产生 Downloads 文件；手动导出 / 全量导出能力仍保留，但产物落在 Downloads 后需 `--with-downloads` 回填或手动移入 `_inbox`。
 
 ## 自动同步（AfterChat AutoSync · 全面热备份）
 
