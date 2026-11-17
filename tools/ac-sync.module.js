@@ -10,7 +10,13 @@
   //  =============================================================
 
   // ---- 平台开关：一行改这里即可增减自动同步平台 ----
-  const AC_SYNC_PLATFORMS = ['gemini', 'grok'];
+  const AC_SYNC_PLATFORMS = [
+    'm365', 'copilot', 'ima', 'zai', 'chatglm', 'duck', 'pplx',
+    'deepseek', 'qwen', 'qianwen', 'yuanbao', 'hunyuan', 'kimi',
+    'doubao', 'minimax', 'aistudio', 'openai', 'grok', 'grokcom',
+    'gemini', 'gaim', 'arena', 'mistral', 'sakana', 'claude',
+    'poe', 'monica', 'stepfun', 'stepfunchat',
+  ];
 
   const AC_SYNC_STATE_KEY = 'ac-sync-state';          // 状态（localStorage，不含对话内容）
   const AC_SYNC_ANCHOR_PREFIX = 'ac-sync-anchor-';    // 新锚点 key 前缀（不写 m365-export-anchor-*）
@@ -540,7 +546,7 @@
     // ---- 小按钮：与主按钮同风格，绝对定位在主按钮左侧，不影响既有布局/事件 ----
     acSyncMenuBtn = document.createElement('button');
     acSyncMenuBtn.id = 'm365-ac-sync-btn';
-    acSyncMenuBtn.title = '自动同步（建议目录 C:\\Users\\SsuJo_\\Chats\\_sync，可任选）';
+    acSyncMenuBtn.title = '自动同步：把当前站点对话增量写入所选目录（可自选）';
     acSyncMenuBtn.style.cssText = `
       position: absolute; right: 44px; bottom: 0;
       width: 28px; height: 28px; border-radius: 50%;

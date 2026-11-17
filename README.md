@@ -19,21 +19,24 @@ C:\Users\SsuJo_\Chats\
 └── grok-home\sessions\…\          # → DEJA_GROK_ROOT  （Grok 对话，Grok CLI summary+updates 格式）
 ```
 
-## 数据流（三个来源、增量+底档，自动合并去重）
+## 数据流（全平台增量 + 官方底档，自动合并去重）
 
 | 来源 | 日常增量（转换器默认扫 `_inbox` + `_sync`） | 底档 / 一次性回填 |
 |---|---|---|
-| ChatGPT | 备份插件导出的 zip 放进 `_inbox`（留在 Downloads 时用 `--with-downloads` 回填） | 同左（或官方 conversations.json zip） |
-| Gemini | AfterChat 自动同步 → `_sync\gemini\*.md` | 官方 Google Takeout（`我的活动/Gemini Apps/我的活动记录.json`）：放进 `_inbox`，或 `--with-takeout` 一次性回填 `G:\我的云端硬盘\Takeout`（zip 或散装 json） |
-| Grok | AfterChat 自动同步 → `_sync\grok\*.md` | grok.com 官方导出（含 prod-grok-backend.json 的 zip 或散装），放 `_inbox` |
+| ChatGPT | 备份插件导出的 zip 放进 `_inbox`（留在 Downloads 时用 `--with-downloads` 回填）；AfterChat 的 `openai` 也会写 `_sync\openai\*.md` | 同左（或官方 conversations.json zip） |
+| Gemini | AfterChat 自动同步 → `_sync\gemini\*.md` → Gemini CLI 原生 store | 官方 Google Takeout（`我的活动/Gemini Apps/我的活动记录.json`）：放进 `_inbox`，或 `--with-takeout` 一次性回填 `G:\我的云端硬盘\Takeout`（zip 或散装 json） |
+| Grok | AfterChat 自动同步 → `_sync\grok\*.md`（含 `grokcom`）→ Grok CLI 原生 store | grok.com 官方导出（含 prod-grok-backend.json 的 zip 或散装），放 `_inbox` |
+| 其余 27 个网页平台 | AfterChat 自动同步 → `_sync\<平台>\ *.md`，带 `[平台名]` 前缀统一进 Amp store | 无官方底档；浏览器访问对应站点即可增量备份 |
 
-转换器默认只扫 `_inbox` + `_sync`（`_sync` 递归，覆盖 `<平台>\` 子目录）。**Downloads 与 `G:\我的云端硬盘\Takeout` 不再日常扫**；需要回填时显式加 `--with-downloads` / `--with-takeout`（可与 `--force` 叠加）。脚本只读输入，不移动、不删除任何导出文件。`_sync` 下路径中带 `_failed` 目录组件的文件会被跳过（失败件没有有效 AfterChat 元数据）。
+转换器默认只扫 `_inbox` + `_sync`（`_sync` 递归，覆盖 `<平台>\` 子目录，目录名作为平台提示）。Gemini / Grok 写各自原生 deja store；**其余平台统一以 `[平台名]` 前缀写入 Amp store**，保留原始 URL 和完整消息（含 System），因此 `deja "关键词"` 可全局搜到。`_sync` 下路径中带 `_failed` 目录组件的文件会被跳过（失败件没有有效 AfterChat 元数据）。
+
+> **为什么统一进 Amp，而不是各平台原生 store？** deja 没有通用 `import` 或多轮对话 JSONL 格式；Qwen/Kimi/MiniMax/DeepSeek/Copilot 的 schema 各异，且 DeepSeek 要 zstd、Kimi 要事件序列重建、Copilot Chat 随 VS Code 版本漂移，直接写活跃 store 风险高。Amp 则由 `DEJA_AMP_ROOT` 指向本仓自有目录，writer 字段（id / created 毫秒 / content 块）与 deja 官方 `amp.go` 解析器逐项吻合，幂等且不会污染其他应用的活跃数据。
 
 转换器按内容自动识别格式，不认文件名；同一对话多来源按 (role, text) 哈希去重合并，时间戳取较新。处理过的输入记录 sha256，重复出现零处理。
 
 ## 日常使用
 
-**平时什么都不用做。**Gemini / Grok 由浏览器里的 AfterChat 自动同步写进 `_sync`；两个计划任务（`deja-chat-sync` 22:30、`deja-chat-sync-noon` 12:30）自动扫 `_inbox` + `_sync`，有新文件就转换并 `deja index`。手动跑：双击 `sync.cmd` 或 `Start-ScheduledTask deja-chat-sync`。想马上搜到刚同步的对话，也直接运行 `C:\Users\SsuJo_\Chats\sync.cmd`（增量，几秒到几分钟）。
+**平时什么都不用做。**浏览器打开任意已适配站点（29 个平台），AfterChat 自动同步就把「上次同步之后」的新对话直接写进 `_sync\<平台>\`；两个计划任务（`deja-chat-sync` 22:30、`deja-chat-sync-noon` 12:30）自动扫 `_inbox` + `_sync`，有新文件就转换并 `deja index`。手动跑：双击 `sync.cmd` 或 `Start-ScheduledTask deja-chat-sync`。想马上搜到刚同步的对话，也直接运行 `C:\Users\SsuJo_\Chats\sync.cmd`（增量，几秒到几分钟）。
 
 ChatGPT 仍走手动备份 zip：放进 `_inbox` 即被默认扫描；若留在 Downloads，用 `--with-downloads` 回填一次。
 
@@ -41,31 +44,31 @@ ChatGPT 仍走手动备份 zip：放进 `_inbox` 即被默认扫描；若留在 
 
 1. ✅ **Gemini 底档（2026-11-15 已完成）**：官方 Takeout 已在 `G:\我的云端硬盘\Takeout\`，此前已接入。该目录**不再日常扫**；今后拿到新 Takeout，放进 `_inbox`，或运行 `python chat2deja.py --with-takeout` 再跑 `sync.cmd` 回填。
 2. ✅ **Grok（2026-11-15 已完成）**：60 个对话已通过 AfterChat 导出 zip 接入。日常增量改由自动同步写 `_sync\grok\`（见下节）。
-3. **Gemini/Grok 增量**：油猴里用 AfterChat + AutoSync（安装见下节）。在 gemini.google.com / grok.com 打开网页即自动增量同步，不用再点导出、不再产生 Downloads 文件。手动导出 / 全量导出能力仍保留，但产物落在 Downloads 后需 `--with-downloads` 回填或手动移入 `_inbox`。
+3. **全平台增量**：油猴里用 AfterChat + AutoSync（安装见下节）。在任意 29 个已适配站点打开网页即自动增量同步，不用再点导出、不再产生 Downloads 文件；手动导出 / 全量导出能力仍保留，但产物落在 Downloads 后需 `--with-downloads` 回填或手动移入 `_inbox`。
 
-## 自动同步（AfterChat AutoSync）
+## 自动同步（AfterChat AutoSync · 全面热备份）
 
-AfterChat 油猴脚本加了常驻同步模块：打开 gemini.google.com / grok.com 就把「上次同步之后」的新对话直接写进 `_sync\<平台>\`，不再下载 zip、不进 Downloads。浏览器不开就不同步；deja 12:30 / 22:30 两班索引兜底。
+AfterChat 油猴脚本加了常驻同步模块：打开**任意 29 个已适配站点**就把「上次同步之后」的新对话直接写进 `_sync\<平台>\`，不再下载 zip、不进 Downloads。浏览器不开就不同步；deja 12:30 / 22:30 两班索引兜底。
 
 - **安装 / 升级**：直接从 GitHub Releases 安装 `afterchat-autosync.user.js`。产物已写 `@updateURL` / `@downloadURL` 指向 latest Release；CI 每天检查上游 AfterChat，发现新版会自动构建并发 Release，Tampermonkey 通常会在之后自动升级。若要本地构建：`python tools/patch_afterchat.py` 会用 `vendor/afterchat.user.js` + `tools/ac-sync.module.js` 生成 `dist/afterchat-autosync.user.js`（在 `try { initialize(); }` 注入口前注入，同名同 namespace，可直接覆盖旧脚本槽位）。
-- **首次启用**：在 gemini / grok 页面点右下角导出按钮左侧的 `⇅` 小圆钮 → 面板里「开启自动同步」→ 选目录。默认建议 `C:\Users\SsuJo_\Chats\_sync`（首次先手工建这个空目录）；多人共用一台机器可各自选别的目录。每个平台在所选目录下建 `<平台>\` 与 `<平台>\_failed\`。换目录用面板里「更换目录」，锚点保留、文件同名覆盖，不会重导。
+- **首次启用**：在任意支持站点点右下角导出按钮左侧的 `⇅` 小圆钮 → 面板里「开启自动同步」→ 选目录。建议选一个空目录（首次先手工建好）；多人共用一台机器可各自选别的目录。每个平台在所选目录下建 `<平台>\` 与 `<平台>\_failed\`。换目录用面板里「更换目录」，锚点保留、文件同名覆盖，不会重导。
 - **权限**：选目录时浏览器授予一次；重启浏览器后可能需要再点 `⇅` → 「立即同步」完成一次授权（浏览器要求手势，脚本不会自动弹窗）。
 - **触发时机**：脚本启动 15 秒跑一轮，之后每 10 分钟一轮，从别的标签切回页面也触发（60 秒防抖）；后台页不跑。连续失败会退避，单飞锁防止并发。
-- **平台范围**：本期只开 gemini + grok；其他平台在同步模块的 `AC_SYNC_PLATFORMS` 数组里加一行即可启用。
+- **平台范围（29 个，全部默认开启）**：M365 Copilot、Microsoft Copilot、腾讯 ima、Z.ai、智谱清言、DuckDuckGo、Perplexity、DeepSeek、通义千问、千问、腾讯元宝、腾讯混元、Kimi、豆包/Dola、MiniMax Agent、Google AI Studio、ChatGPT、Grok(x.com)、Grok Web、Gemini、Google AI Mode、Arena、Mistral、Sakana、Claude、Poe、Monica、StepFun Studio、StepFun Chat。要缩减范围就在同步模块的 `AC_SYNC_PLATFORMS` 数组里删对应 id。
 - **只读导出**：只读取网页对话并写 `_sync` 文件，不会在网站上创建或修改任何对话。
 - **失败与重置起点**：单条拉取失败写进对应平台的 `_failed\<时间>-<标题>.md`，主流程继续；转换器递归扫描 `_sync` 时会跳过所有名为 `_failed` 的目录组件，这些文件不会被摄入。零失败才推进同步锚点。面板里「重置起点(重导)」删锚点并清 `_failed`，下一轮按新起点重拉；因为转换器按 URL 会话 ID + 内容去重，重导在 deja 里是零增量（repair 语义）。
 
 ## CI / 自动更新
 
-- `version.json` 记录上游版本和本仓发布版本（如 `1.24.1-ac1`）；`vendor/afterchat.user.js` 是可复现构建的上游快照。
+- `version.json` 记录上游版本和本仓发布版本（如 `1.24.1-ac2`）；`vendor/afterchat.user.js` 是可复现构建的上游快照。
 - GitHub Actions：每天检查 AfterChat 上游；上游版本或快照有变化就更新快照、升发布版本、推送 commit 并创建 Release。推 `v*` tag 或手动触发也会构建。
 - Release 里固定资产名 `afterchat-autosync.user.js`，因此 userscript 的 `@updateURL` / `@downloadURL` 可用 latest-release 稳定地址自动升级。
 - 本地校验：`python tools/verify_autosync.py --base .`。
 
 ## 查询
 
-- `deja "关键词"` — 全局搜（三个新槽位来源标记 amp / gemini / grok）
-- `deja --harness amp "…"` — 只搜 ChatGPT
+- `deja "关键词"` — 全局搜（Gemini/Grok 原生来源 + Amp 槽位里的 ChatGPT 与其余 27 个平台，标题带 `[平台名]`）
+- `deja --harness amp "…"` — 只搜 ChatGPT + 其余 27 个网页平台
 - `deja --harness gemini "…"` — 只搜 Gemini
 - `deja --harness grok "…"` — 只搜 Grok
 

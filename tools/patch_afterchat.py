@@ -13,7 +13,7 @@ afterchat-autosync.user.js。
   - 注入口: `try { initialize(); } catch {}`（IIFE 内，可访问 PLATFORM_ADAPTERS 等闭包成员）；
     找不到时回退到注释 `// ---- 启动（不要改） ----`（先在其后几十行内再找 initialize 调用行）。
   - 模块用 BEGIN/END 标记包裹，幂等：已有块则原地整体替换，绝不重复。
-  - @version 追加 -<tag>（默认 -ac1），幂等：先剥掉旧 -acN 再追加。
+  - @version 追加 -<tag>（默认 -ac2），幂等：先剥掉旧 -acN 再追加。
   - 默认写入 @updateURL/@downloadURL，指向 GitHub latest Release，供 Tampermonkey 自动升级。
   - @name/@namespace 不动，Tampermonkey 同名覆盖旧脚本槽位。
 """
@@ -28,7 +28,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SOURCE_FILE = REPO_ROOT / "vendor" / "afterchat.user.js"
 DEFAULT_MODULE = REPO_ROOT / "tools" / "ac-sync.module.js"
 DEFAULT_OUT = REPO_ROOT / "dist" / "afterchat-autosync.user.js"
-DEFAULT_VERSION_TAG = "ac1"
+DEFAULT_VERSION_TAG = "ac2"
 DEFAULT_UPDATE_URL = "https://github.com/SsuJojo/afterchat-autosync/releases/latest/download/afterchat-autosync.user.js"
 DEFAULT_DOWNLOAD_URL = DEFAULT_UPDATE_URL
 
@@ -339,7 +339,7 @@ def main(argv=None) -> int:
     p.add_argument("--out", default=DEFAULT_OUT,
                    help=f"输出路径（默认 {DEFAULT_OUT}）")
     p.add_argument("--version-tag", default=DEFAULT_VERSION_TAG,
-                   help=f"@version 后缀标签（默认 {DEFAULT_VERSION_TAG}，产物形如 1.24.1-ac1）")
+                   help=f"@version 后缀标签（默认 {DEFAULT_VERSION_TAG}，产物形如 1.24.1-ac2）")
     p.add_argument("--update-url", default=DEFAULT_UPDATE_URL,
                    help=f"写入 @updateURL 的稳定地址（默认 GitHub latest Release）")
     p.add_argument("--download-url", default=DEFAULT_DOWNLOAD_URL,

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 r"""
-chat2deja.py — 把 ChatGPT / Gemini / Grok 网页对话导出转成 deja 三个空闲源的本地格式。
+chat2deja.py — 把 AfterChat 自动同步的网页对话导出转成 deja 本地格式。
 
 输入（按内容自动识别，不靠文件名）：
   A. ChatGPT 备份插件 zip   — accounts/*/conversations/*.json
@@ -13,9 +13,12 @@ chat2deja.py — 把 ChatGPT / Gemini / Grok 网页对话导出转成 deja 三�
   E. AfterChat 增量 zip/md — Markdown（## Metadata / - **URL:** … / ### 🧑‍💻 User / ### 🤖 Assistant）
 
 输出（幂等；内容没变就不重写，避免 deja 无谓重读）：
-  amp-threads\<id>.json                                  ChatGPT → Amp thread      (DEJA_AMP_ROOT)
+  amp-threads\<id>.json                                  ChatGPT + 其他 27 个网页平台 → Amp thread (DEJA_AMP_ROOT)
   gemini-home\tmp\Gemini\chats\<id>.jsonl                Gemini  → Gemini CLI      (DEJA_GEMINI_ROOT)
   grok-home\sessions\<enc-cwd>\<id>\{summary,updates}    Grok    → Grok CLI        (DEJA_GROK_ROOT）
+
+  `_sync\<平台>\` 子目录名会作为平台提示：Gemini/Grok 走原生 store，其余平台统一
+  以 `[平台名]` 前缀写入 Amp store，并保留原始 URL 与完整消息，deja 可全局搜索。
 
 合并规则：同一对话多来源（官方底档 + AfterChat 增量）按 (role,text) 跨来源去重；
 同来源内的重复发言（例如连说两次“继续”）保留，不会误删。
@@ -62,6 +65,20 @@ CHATGPT_URI = "file:///C:/Users/SsuJo_/Chats/ChatGPT"
 GEMINI_URI = "file:///C:/Users/SsuJo_/Chats/Gemini"
 GROK_CWD = "C:\\Users\\SsuJo_\\Chats\\Grok"
 GROK_ENC = urllib.parse.quote(GROK_CWD, safe="")
+
+# AfterChat 平台 id → 展示名（与 _sync\<id>\ 目录名一致）
+WEB_PLATFORM_NAMES = {
+    "m365": "M365 Copilot", "copilot": "Microsoft Copilot", "ima": "腾讯 ima",
+    "zai": "Z.ai", "chatglm": "智谱清言", "duck": "DuckDuckGo",
+    "pplx": "Perplexity", "deepseek": "DeepSeek", "qwen": "通义千问",
+    "qianwen": "千问", "yuanbao": "腾讯元宝", "hunyuan": "腾讯混元",
+    "kimi": "Kimi", "doubao": "豆包/Dola", "minimax": "MiniMax",
+    "aistudio": "Google AI Studio", "openai": "ChatGPT", "grok": "Grok",
+    "grokcom": "Grok Web", "gemini": "Gemini", "gaim": "Google AI Mode",
+    "arena": "Arena", "mistral": "Mistral", "sakana": "Sakana",
+    "claude": "Claude", "poe": "Poe", "monica": "Monica",
+    "stepfun": "StepFun Studio", "stepfunchat": "StepFun Chat",
+}
 
 def log(msg):
     print(msg, flush=True)
@@ -557,9 +574,48 @@ def handle_grok_zip(zf, name):
 # ================================================================ E: AfterChat markdown
 MD_URL = re.compile(r"^\s*-\s*\*\*URL:\*\*\s*(\S+)", re.M)
 MD_TIME = re.compile(r"^\s*-\s*\*\*Time:\*\*\s*(.+)$", re.M)
-MD_USER = re.compile(r"^###\s+(?:🧑‍💻\s*)?User\s*$", re.M)
-MD_ASST = re.compile(r"^###\s+(?:🤖\s*)?Assistant\s*$", re.M)
+MD_USER = re.compile(r"^###\s+(?:🧑‍💻\s*|🧑💻\s*)?User\b.*$", re.M)
+MD_ASST = re.compile(r"^###\s+(?:🤖\s*)?Assistant\b.*$", re.M)
+MD_SYSTEM = re.compile(r"^###\s+(?:⚙️?\s*)?System\b.*$", re.M)
 FNAME_TS = re.compile(r"^\d{8}-\d{6}-(.+?)\.md$", re.I)
+
+HOST_PLATFORM = {
+    "copilot.cloud.microsoft": "m365", "m365.cloud.microsoft": "m365",
+    "copilot.microsoft.com": "copilot", "ima.qq.com": "ima", "z.ai": "zai",
+    "chatglm.cn": "chatglm", "duck.ai": "duck", "perplexity.ai": "pplx",
+    "chat.deepseek.com": "deepseek", "tongyi.aliyun.com": "qwen",
+    "qianwen.com": "qianwen", "yuanbao.tencent.com": "yuanbao",
+    "hunyuan.tencent.com": "hunyuan", "kimi.com": "kimi",
+    "kimi.moonshot.cn": "kimi", "doubao.com": "doubao",
+    "agent.minimax.io": "minimax", "agent.minimaxi.com": "minimax",
+    "aistudio.google.com": "aistudio", "chatgpt.com": "openai",
+    "gemini.google.com": "gemini", "grok.com": "grokcom",
+    "arena.ai": "arena", "chat.mistral.ai": "mistral", "sakana.ai": "sakana",
+    "claude.ai": "claude", "poe.com": "poe", "monica.im": "monica",
+    "stepfun.com": "stepfun", "chat.stepfun.com": "stepfunchat",
+}
+
+def platform_from_url(url):
+    try:
+        host = (urllib.parse.urlsplit(url).hostname or "").lower()
+    except Exception:
+        return None
+    for suffix, pid in HOST_PLATFORM.items():
+        if host == suffix or host.endswith("." + suffix):
+            return pid
+    return None
+
+def afterchat_conv_id(url, title, msgs, platform):
+    """稳定会话 id：规范化 URL，去掉易变的 query/fragment，退化时用标题+首条用户消息。"""
+    parts = urllib.parse.urlsplit(url or "")
+    basis = ""
+    if parts.scheme and parts.netloc:
+        basis = f"{parts.scheme}://{parts.netloc.lower()}{parts.path}".rstrip("/")
+    if not basis or basis.count("/") < 3:
+        first_user = next((m["text"] for m in msgs if m["role"] == "user"), "")
+        basis = f"{title or ''}\n{first_user}"
+    digest = hashlib.sha256((platform + "|" + basis).encode("utf-8")).hexdigest()[:16]
+    return f"afterchat-{platform}-{digest}"
 
 def parse_afterchat_markdown(text, title_hint=None):
     urls = MD_URL.findall(text)
@@ -577,6 +633,7 @@ def parse_afterchat_markdown(text, title_hint=None):
     body = text[conv_start:] if conv_start >= 0 else text
     marks = [(m.start(), "user") for m in MD_USER.finditer(body)]
     marks += [(m.start(), "assistant") for m in MD_ASST.finditer(body)]
+    marks += [(m.start(), "system") for m in MD_SYSTEM.finditer(body)]
     marks.sort()
     msgs = []
     for i, (s, role) in enumerate(marks):
@@ -591,7 +648,7 @@ def parse_afterchat_markdown(text, title_hint=None):
         return None
     return url, ts, title_hint, msgs
 
-def route_afterchat_md(text, title_hint):
+def route_afterchat_md(text, title_hint, platform_hint=None):
     r = parse_afterchat_markdown(text, title_hint)
     if not r:
         return None
@@ -606,10 +663,21 @@ def route_afterchat_md(text, title_hint):
         if m:
             WRITER.add("grok", m.group(1), title_hint, GROK_CWD, msgs)
             return "grok"
-    return None
 
-def handle_afterchat_zip(zf, name):
-    n = {"gemini": 0, "grok": 0}
+    # Gemini/Grok 原生路由没匹配上时不落 Amp，避免同一对话重复入库
+    if platform_hint in ("gemini", "grok") or platform_from_url(url) in ("gemini", "grok"):
+        return None
+
+    platform = platform_hint or platform_from_url(url) or "web"
+    display = WEB_PLATFORM_NAMES.get(platform, platform)
+    conv_id = afterchat_conv_id(url, title_hint, msgs, platform)
+    first_user = next((m["text"] for m in msgs if m["role"] == "user"), "")
+    label = f"[{display}] {title_hint or first_user[:40] or 'untitled'}"
+    WRITER.add("amp", conv_id, label, url, msgs)
+    return platform
+
+def handle_afterchat_zip(zf, name, platform_hint=None):
+    n = {}
     for entry in zf.infolist():
         if entry.is_dir() or not entry.filename.lower().endswith(".md"):
             continue
@@ -620,18 +688,19 @@ def handle_afterchat_zip(zf, name):
             text = zf.read(entry).decode("utf-8")
         except Exception:
             continue
-        which = route_afterchat_md(text, title_hint)
+        which = route_afterchat_md(text, title_hint, platform_hint)
         if which:
-            n[which] += 1
-    log(f"  AfterChat「{name}」: gemini={n['gemini']} grok={n['grok']}")
-    return n["gemini"] + n["grok"]
+            n[which] = n.get(which, 0) + 1
+    detail = ", ".join(f"{k}={v}" for k, v in sorted(n.items())) or "无"
+    log(f"  AfterChat「{name}」: {detail}")
+    return sum(n.values())
 
 # ================================================================ dispatcher
 ZIP_HINTS = ("chatgpt", "increment", "takeout", "grok", "afterchat", "gemini", "backup", "export", "聊天")
 JSON_HINTS = ("myactivity", "我的活动", "my activity", "grok", "conversations.json")
 JSON_GEMINI_MARKS = (b'"safeHtmlItem"', b'"titleUrl"', b'"userInteractions"', b'"attachedFiles"')
 
-def classify_and_process(path, seen, force=False):
+def classify_and_process(path, seen, force=False, platform_hint=None):
     fp = fingerprint(path)
     if fp in seen and not force:
         log(f"  [跳过] 已处理: {os.path.basename(path)}")
@@ -655,7 +724,7 @@ def classify_and_process(path, seen, force=False):
                 elif has_gm:
                     kind = "gemini-takeout"; n = handle_gemini_zip(zf, os.path.basename(path))
                 elif has_md:
-                    kind = "afterchat"; n = handle_afterchat_zip(zf, os.path.basename(path))
+                    kind = "afterchat"; n = handle_afterchat_zip(zf, os.path.basename(path), platform_hint)
         elif low.endswith(".json"):
             with open(path, "rb") as f:
                 head = f.read(65536)
@@ -675,7 +744,7 @@ def classify_and_process(path, seen, force=False):
             with open(path, "r", encoding="utf-8") as f:
                 text = f.read()
             fm = FNAME_TS.match(os.path.basename(path))
-            which = route_afterchat_md(text, fm.group(1) if fm else None)
+            which = route_afterchat_md(text, fm.group(1) if fm else None, platform_hint)
             n = 1 if which else 0
     except Exception as e:
         log(f"  ! 处理失败 {os.path.basename(path)}: {type(e).__name__}: {e}")
@@ -720,13 +789,17 @@ def main():
             continue
         for _, full in sorted(items):
             low = os.path.basename(full).lower()
+            platform_hint = None
+            if os.path.normcase(os.path.abspath(root)) == os.path.normcase(SYNC):
+                first = os.path.relpath(full, root).split(os.sep)[0]
+                platform_hint = first if first in WEB_PLATFORM_NAMES else None
             if low.endswith(".zip") and not any(k in low for k in ZIP_HINTS):
                 continue  # 未知名 zip 不碰
             if low.endswith(".json") and not any(k in low for k in JSON_HINTS):
                 continue  # 散装 json 只认这几种
-            if low.endswith(".md") and "chatgpt" in low:
-                continue  # ChatGPT 有专用备份 zip，md 跳过
-            classify_and_process(full, seen, force)
+            if low.endswith(".md") and "chatgpt" in low and platform_hint is None:
+                continue  # 非同步目录的 ChatGPT md 让专用备份 zip 处理
+            classify_and_process(full, seen, force, platform_hint)
     counts = WRITER.flush()
     log(f"转换完成: amp={counts['amp']} gemini={counts['gemini']} grok={counts['grok']}"
         f"（写出 {WRITER.written}，内容未变 {WRITER.unchanged}）")

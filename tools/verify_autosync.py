@@ -53,8 +53,15 @@ if mod:
             top_return = True
         depth += _code.count("{") - _code.count("}")
     check("module: no top-level return", not top_return)
-    check("module: platform switch gemini+grok", bool(re.search(
-        r"AC_SYNC_PLATFORMS\s*=\s*\[[^\]]*'gemini'[^\]]*'grok'", mod)))
+    all_platforms = [
+        "m365", "copilot", "ima", "zai", "chatglm", "duck", "pplx",
+        "deepseek", "qwen", "qianwen", "yuanbao", "hunyuan", "kimi",
+        "doubao", "minimax", "aistudio", "openai", "grok", "grokcom",
+        "gemini", "gaim", "arena", "mistral", "sakana", "claude",
+        "poe", "monica", "stepfun", "stepfunchat",
+    ]
+    check("module: all 29 platforms enabled",
+          all(("'" + p + "'") in mod for p in all_platforms))
     check("module: FSA directory picker", "showDirectoryPicker" in mod)
     check("module: permission query", "queryPermission" in mod and "requestPermission" in mod)
     check("module: IndexedDB handle store", "indexedDB" in mod and "acSyncDb" in mod)
@@ -87,13 +94,19 @@ if cv:
     check("converter: skips _failed", "_failed" in cv)
     check("converter: recursive walk", "os.walk" in cv)
     check("converter: --force preserved", "--force" in cv)
+    check("converter: platform hint from _sync", "platform_hint" in cv and "WEB_PLATFORM_NAMES" in cv)
+    check("converter: generic Web -> Amp fallback",
+          'WRITER.add("amp", conv_id, label, url, msgs)' in cv)
+    check("converter: every AfterChat md gets a route",
+          "platform_hint or platform_from_url(url) or \"web\"" in cv and
+          "n = 1 if which else 0" in cv)
 
 rd = text(README) or ""
 if rd:
     check("README: AutoSync section", "AfterChat AutoSync" in rd)
     check("README: optional directory", "选目录" in rd or "自选" in rd)
     check("README: no daily Downloads scan", "--with-downloads" in rd)
-    check("README: gemini+grok scope", "gemini" in rd and "grok" in rd)
+    check("README: all-platform scope", "29 个" in rd and "全面" in rd)
 
 if os.path.isfile(OUT):
     out = text(OUT) or ""
