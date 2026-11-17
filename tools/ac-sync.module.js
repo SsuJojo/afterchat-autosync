@@ -5,6 +5,9 @@
   //  复用闭包内 PLATFORM_ADAPTERS / getConversationSortTime / makeMarkdownZipFilename
   //  等内部件，把“上次同步之后”的新对话经 FSA 目录句柄直写本地 _sync 目录，
   //  不产生下载文件、不进 Downloads。
+  //  排队续传：待办队列与已导出登记持久化在 <id>/_sync_index.json，崩溃后从
+  //  索引续传；限流按错误文本识别 → 30min 静默 + 收窄批量；单条指数退避重试，
+  //  反复失败写 _failed/ 毒丸并定时跳过。
   //  只读网站：仅调用既有 adapter 的读取方法，绝不创建/发送/点击任何会
   //  改动账号状态的东西；唯一写入目标是用户授权的本地目录。
   //  =============================================================
@@ -27,6 +30,17 @@
   const AC_SYNC_BASE_INTERVAL = 10 * 60 * 1000;       // 常规间隔 10min
   const AC_SYNC_MAX_BACKOFF = 60 * 60 * 1000;         // 连续失败退避上限 60min
   const AC_SYNC_VISIBLE_DEBOUNCE = 60 * 1000;         // 回前台触发防抖 60s
+  const AC_SYNC_INDEX_NAME = '_sync_index.json';      // 每平台持久化索引：待办队列/已导出登记（崩溃可续传）
+  const AC_SYNC_INDEX_VERSION = 2;
+  const AC_SYNC_429_BACKOFF = 30 * 60 * 1000;         // 命中限流后的平台静默期
+  const AC_SYNC_IN_ROUND_RETRIES = 2;                 // 单条轮内限流重试次数
+  const AC_SYNC_RETRY_BASE = 5 * 1000;                // 单条重试退避基数
+  const AC_SYNC_RETRY_MAX = 40 * 1000;                // 单条重试退避上限
+  const AC_SYNC_RETRY_JITTER = 2 * 1000;              // 单条重试退避抖动
+  const AC_SYNC_ATTEMPT_CAP = 6;                      // 单条跨轮尝试上限（超过转毒丸）
+  const AC_SYNC_SKIP_AFTER_POISON = 24 * 60 * 60 * 1000; // 毒丸后的定时跳过窗口
+  const AC_SYNC_DRAIN_BATCH_STABLE = 2;               // 常规小批量排水条数
+  const AC_SYNC_EXPORTED_CAP = 2000;                  // 已导出登记上限（防索引无限膨胀）
 
   // ---- 状态层：localStorage ac-sync-state = { dirName, enabled, platforms: {...} } ----
   function acSyncReadState() {
@@ -132,102 +146,289 @@
   }
 
   // =============================================================
-  //  导出器：对当前站点的一个 adapter 跑一轮增量同步
-  //  流程：锚点 → getAllConversations({boundary}) → 过滤 → 详情 → toMarkdown → 直写
-  //  任何失败：写 _failed/ + 记 lastError + 锚点不前移；零失败才推进锚点
+  //  持久化索引：<id>/_sync_index.json（崩溃可续传的队列/登记/毒丸）
+  //  exportedConversations: id → 导出时的排序时间；exportOrder 维护插入序
+  //  （数字样 id 在对象里按值序遍历，裁剪需按数组序）；pending* 为待办队列；
+  //  poison 为毒丸（24h 定时跳过）；backoffUntil 为平台限流静默期
+  //  =============================================================
+  function acSyncNewIndex(platformId) {
+    return {
+      v: AC_SYNC_INDEX_VERSION,
+      platform: platformId,
+      exportedConversations: {},
+      exportOrder: [],
+      exportedFilenames: [],
+      pendingConversationIds: [],
+      pendingConversations: {},
+      poison: {},
+      backoffUntil: 0,
+      recent429Count: 0,
+      last429At: 0,
+    };
+  }
+
+  function acSyncNormalizeIndex(raw, platformId) {
+    const idx = acSyncNewIndex(platformId);
+    if (!raw || typeof raw !== 'object') return idx;
+    if (raw.exportedConversations && typeof raw.exportedConversations === 'object') {
+      idx.exportedConversations = raw.exportedConversations;
+    }
+    if (Array.isArray(raw.exportOrder)) idx.exportOrder = raw.exportOrder.filter((s) => typeof s === 'string');
+    if (Array.isArray(raw.exportedFilenames)) idx.exportedFilenames = raw.exportedFilenames.filter((s) => typeof s === 'string');
+    if (Array.isArray(raw.pendingConversationIds)) idx.pendingConversationIds = raw.pendingConversationIds.filter((s) => typeof s === 'string' && s);
+    if (raw.pendingConversations && typeof raw.pendingConversations === 'object') idx.pendingConversations = raw.pendingConversations;
+    if (raw.poison && typeof raw.poison === 'object') idx.poison = raw.poison;
+    const n = Number(raw.backoffUntil); if (Number.isFinite(n)) idx.backoffUntil = n;
+    const r = Number(raw.recent429Count); if (Number.isFinite(r)) idx.recent429Count = Math.max(0, Math.floor(r));
+    const l = Number(raw.last429At); if (Number.isFinite(l)) idx.last429At = l;
+    return idx;
+  }
+
+  async function acSyncReadIndex(platformDir, platformId) {
+    try {
+      const fh = await platformDir.getFileHandle(AC_SYNC_INDEX_NAME, { create: false });
+      const file = await fh.getFile();
+      const obj = JSON.parse(await file.text());
+      if (obj && obj.v === AC_SYNC_INDEX_VERSION) return acSyncNormalizeIndex(obj, platformId);
+    } catch (e) { /* 不存在或损坏 → 重建（列表重拉自然补齐） */ }
+    return acSyncNewIndex(platformId);
+  }
+
+  async function acSyncWriteIndex(platformDir, index) {
+    await acSyncWriteFile(platformDir, AC_SYNC_INDEX_NAME, JSON.stringify(index, null, 2));
+  }
+
+  function acSyncRegisterExported(index, cid, t) {
+    if (!(cid in index.exportedConversations)) index.exportOrder.push(cid);
+    index.exportedConversations[cid] = t;
+    if (index.exportOrder.length > AC_SYNC_EXPORTED_CAP) {
+      const drop = index.exportOrder.splice(0, index.exportOrder.length - AC_SYNC_EXPORTED_CAP);
+      for (const d of drop) delete index.exportedConversations[d];
+    }
+  }
+
+  function acSyncPushFilename(index, filename) {
+    index.exportedFilenames.push(filename);
+    if (index.exportedFilenames.length > AC_SYNC_EXPORTED_CAP) {
+      index.exportedFilenames.splice(0, index.exportedFilenames.length - AC_SYNC_EXPORTED_CAP);
+    }
+  }
+
+  // 限流识别：适配器把 HTTP 状态码拼进错误文本（无独立 status/Retry-After 可读），
+  // 只能按文本匹配；Retry-After 无法解析 → 退避走固定 30min
+  function acSyncIsRateLimit(text) {
+    if (!text) return false;
+    const s = String(text);
+    return /\b429\b/.test(s) || /too many requests/i.test(s);
+  }
+
+  function acSyncActivePoisonCount(index) {
+    const now = Date.now();
+    let n = 0;
+    for (const p of Object.values(index.poison)) {
+      if (p && Number(p.until) > now) n++;
+    }
+    return n;
+  }
+
+  // 毒丸失败标记：一条一文件落 _failed/（含 ID / 错误 / 尝试次数）
+  async function acSyncWriteFailureMark(failedDir, usedFailNames, runAt, platformId, f) {
+    const runTs = acSyncRunStamp(runAt);
+    const lines = [
+      `# 自动同步失败清单 ${runTs}`,
+      '',
+      `- 平台: ${platformId}`,
+      `- 时间: ${formatLocalTime(new Date(runAt))}`,
+      `- 已尝试: ${f.attempts} 次`,
+      '',
+      `## ${f.title}`,
+      `- ID: \`${f.id}\``,
+      `- 错误: ${f.error}`,
+      `- 处理: 挂起 24h 后自动重试`,
+      '',
+    ];
+    const base = `${runTs}-${sanitizeFilename(f.title, 80)}`;
+    let failName = `${base}.md`;
+    let n = 2;
+    while (usedFailNames.has(failName)) { failName = `${base}-${n}.md`; n++; }
+    usedFailNames.add(failName);
+    try { await acSyncWriteFile(failedDir, failName, lines.join('\n')); }
+    catch (e) { console.error('[AC-Sync] 写 _failed 失败:', e); }
+  }
+
+  // =============================================================
+  //  导出器：对当前站点的一个 adapter 跑一轮增量同步（队列 + 续传）
+  //  流程：锚点 → 列表（增量） → 入队索引 → 小批量逐条排水 → 详情
+  //  → toMarkdown → 直写；每条处理后索引落盘，崩溃后从索引续传
+  //  限流（错误文本含 429/Too Many Requests）→ 停轮 + 平台静默 30min；
+  //  单条普通失败轮内指数退避重试，跨轮累计超限转毒丸（_failed/ + 24h 跳过）
+  //  任何失败：锚点不前移；队列清空且无毒丸才推进
   //  =============================================================
   async function acSyncRunAdapter(adapter, rootHandle) {
     const id = adapter.id;
     const runAt = Date.now();
     const boundary = acSyncLoadAnchor(id);
 
-    // 只读拉取：沿用上游增量语义（boundary 早停翻页），onProgress 不需要
-    const conversations = await adapter.getAllConversations(null, { boundary });
+    const platformDir = await rootHandle.getDirectoryHandle(id, { create: true });
+    const index = await acSyncReadIndex(platformDir, id);
+
+    // 平台限流静默期未到：本轮整轮跳过（队列保留，到期自动续）
+    if (Number(index.backoffUntil) > Date.now()) {
+      return { exported: 0, failed: 0, skipped: 'rate-limit-backoff' };
+    }
+
+    // ---- 列表阶段（只读）：增量拉取，差异并入待办队列 ----
+    let conversations;
+    try {
+      conversations = await adapter.getAllConversations(null, { boundary });
+    } catch (err) {
+      const msg = String(err?.message || err);
+      if (acSyncIsRateLimit(msg)) {
+        index.recent429Count = (index.recent429Count || 0) + 1;
+        index.last429At = Date.now();
+        index.backoffUntil = Date.now() + AC_SYNC_429_BACKOFF;
+        try { await acSyncWriteIndex(platformDir, index); } catch (e) { /* 静默 */ }
+      }
+      throw err;
+    }
     if (!Array.isArray(conversations)) throw new Error('getAllConversations 返回异常');
 
-    let freshList = conversations;
-    if (boundary !== null) {
-      // 拿不到时间的会话保守处理：宁重复不漏，始终导出（与上游一致）
-      freshList = conversations.filter((c) => {
-        const t = getConversationSortTime(c);
-        return t === null || t > boundary;
-      });
+    const now = Date.now();
+    const pendingSet = new Set(index.pendingConversationIds);
+    let maxSeenTime = 0;
+    let queuedCount = 0;
+    for (const c of conversations) {
+      const t = getConversationSortTime(c);
+      if (t !== null && t > maxSeenTime) maxSeenTime = t;
+      const cid = String(c?.id ?? '');
+      if (!cid) continue;
+      const snap = index.pendingConversations[cid];
+      if (pendingSet.has(cid)) {
+        // 已在待办：只刷新标题/时间快照，重试计数保留（快照缺失则重建，不重复入队）
+        index.pendingConversations[cid] = snap || { title: String(c.title || 'untitled'), t, attempts: 0, error: null };
+        if (snap) {
+          snap.title = String(c.title || snap.title || 'untitled');
+          snap.t = t;
+        }
+        continue;
+      }
+      const poison = index.poison[cid];
+      if (poison && Number(poison.until) > now) continue;            // 毒丸跳过期内
+      const exportedT = index.exportedConversations[cid];
+      if (typeof exportedT === 'number' && (t === null || t <= exportedT)) continue;
+      if (poison) delete index.poison[cid];                          // 过期毒丸重新入队
+      pendingSet.add(cid);
+      index.pendingConversationIds.push(cid);
+      index.pendingConversations[cid] = { title: String(c.title || 'untitled'), t, attempts: 0, error: null };
+      queuedCount++;
     }
+    if (queuedCount > 0) await acSyncWriteIndex(platformDir, index);
 
-    if (freshList.length === 0) {
-      // 无新内容：锚点可安全推进到本次运行时刻（上游同款逻辑）
-      acSyncSaveAnchor(id, Math.max(runAt, boundary || 0));
-      acSyncSetPlatformStat(id, { lastRunAt: runAt, lastExported: 0, lastError: null, failStreak: 0 });
-      return { exported: 0, failed: 0 };
-    }
-
-    const limitedList = (CONFIG.DEBUG_LIMIT > 0 && freshList.length > CONFIG.DEBUG_LIMIT)
-      ? freshList.slice(0, CONFIG.DEBUG_LIMIT)
-      : freshList;
-    const total = limitedList.length;
-    const usedNames = new Set();
-    const failures = [];
-    let exported = 0;
-    let maxConvTime = 0;
-
-    const platformDir = await rootHandle.getDirectoryHandle(id, { create: true });
+    // ---- 排水阶段：小批量逐条出队，每条处理后索引落盘（崩溃续传） ----
     const failedDir = await platformDir.getDirectoryHandle('_failed', { create: true });
+    const usedNames = new Set(index.exportedFilenames);
     const usedFailNames = new Set();
+    let exported = 0;
+    let processed = 0;
+    let poisonCount = 0;
+    let stopFor429 = false;
+    const batch = (index.pendingConversationIds.length <= 1 || (index.recent429Count || 0) > 0)
+      ? 1
+      : AC_SYNC_DRAIN_BATCH_STABLE;
 
-    for (let i = 0; i < total; i++) {
-      const conv = limitedList[i];
-      try {
-        const data = await adapter.getConversationDetails(conv.id);
-        if (data?.store) delete data.store.zeroQuery;
-        const chatTitle = getChatTitle(data, conv.title || conv.id || 'untitled');
-        if (typeof adapter.toMarkdown !== 'function') throw new Error('适配器不支持 toMarkdown');
-        const md = adapter.toMarkdown(data, chatTitle, conv.id);
-        // 文件名沿用上游时间前缀规则：会话更新重导仍同名 → 覆盖即更新，天然幂等
-        const filename = makeMarkdownZipFilename({ ...conv, title: chatTitle }, i, total, usedNames);
-        await acSyncWriteFile(platformDir, filename, md);
-        exported++;
-        const t = getConversationSortTime(conv);
-        if (t !== null && t > maxConvTime) maxConvTime = t;
-      } catch (err) {
-        console.error(`[AC-Sync] 导出对话 ${conv.id} 失败:`, err);
-        failures.push({
-          title: conv.title || 'untitled',
-          id: conv.id,
-          error: err?.message || String(err),
-        });
+    while (index.pendingConversationIds.length > 0 && processed < batch && !stopFor429) {
+      const cid = index.pendingConversationIds[0];
+      const snap = index.pendingConversations[cid] || { title: 'untitled', t: null, attempts: 0 };
+      let ok = false;
+      let newFilename = '';
+      let lastMsg = '';
+      let was429 = false;
+
+      for (let attempt = 0; attempt <= AC_SYNC_IN_ROUND_RETRIES; attempt++) {
+        try {
+          const data = await adapter.getConversationDetails(cid);
+          if (data?.store) delete data.store.zeroQuery;
+          const chatTitle = getChatTitle(data, snap.title || 'untitled');
+          if (typeof adapter.toMarkdown !== 'function') throw new Error('适配器不支持 toMarkdown');
+          const md = adapter.toMarkdown(data, chatTitle, cid);
+          // 文件名沿用上游时间前缀规则；快照注入 t 保证跨批次前缀稳定，
+          // exportedFilenames 登记 → 同秒同标题补 -2/-3 而非覆盖
+          const conv = { id: cid, title: chatTitle, t: snap.t };
+          const filename = makeMarkdownZipFilename(conv, 0, 1, usedNames);
+          await acSyncWriteFile(platformDir, filename, md);
+          ok = true;
+          newFilename = filename;
+          break;
+        } catch (err) {
+          lastMsg = String(err?.message || err);
+          if (acSyncIsRateLimit(lastMsg)) { was429 = true; break; }  // 限流不轮内重试
+          if (attempt < AC_SYNC_IN_ROUND_RETRIES) {
+            await sleep(AC_SYNC_RETRY_BASE * Math.pow(2, attempt) + Math.floor(Math.random() * AC_SYNC_RETRY_JITTER));
+          }
+        }
       }
-      // 限速：沿用上游 CONFIG.API_DELAY，不给站点加压
-      if (i < total - 1) await sleep(CONFIG.API_DELAY);
+
+      if (ok) {
+        index.pendingConversationIds.shift();
+        delete index.pendingConversations[cid];
+        acSyncRegisterExported(index, cid, snap.t === null ? runAt : snap.t);
+        acSyncPushFilename(index, newFilename);
+        // 成功缓存一份限流压力（与 DC noteSuccess 同语义）
+        index.recent429Count = Math.max(0, (index.recent429Count || 0) - 1);
+        exported++;
+        processed++;
+        await acSyncWriteIndex(platformDir, index);
+      } else if (was429) {
+        // 限流：条目留队头，本轮停止 + 平台静默 30min（不累计重试次数）
+        index.recent429Count = (index.recent429Count || 0) + 1;
+        index.last429At = Date.now();
+        index.backoffUntil = Date.now() + AC_SYNC_429_BACKOFF;
+        snap.error = lastMsg.substring(0, 300);
+        index.pendingConversations[cid] = snap;
+        stopFor429 = true;
+        await acSyncWriteIndex(platformDir, index);
+      } else {
+        // 普通失败：累计尝试次数，移队尾继续下一条；超限转毒丸
+        snap.attempts = (snap.attempts || 0) + 1;
+        snap.error = lastMsg.substring(0, 300);
+        index.pendingConversations[cid] = snap;
+        index.pendingConversationIds.shift();
+        processed++;
+        if (snap.attempts >= AC_SYNC_ATTEMPT_CAP) {
+          delete index.pendingConversations[cid];
+          index.poison[cid] = { until: Date.now() + AC_SYNC_SKIP_AFTER_POISON, attempts: snap.attempts, error: snap.error };
+          poisonCount++;
+          await acSyncWriteFailureMark(failedDir, usedFailNames, runAt, id, {
+            id: cid, title: snap.title || 'untitled', error: snap.error, attempts: snap.attempts,
+          });
+        } else {
+          index.pendingConversationIds.push(cid);   // 队尾重排，下轮再试
+        }
+        await acSyncWriteIndex(platformDir, index);
+      }
+      if (!stopFor429 && index.pendingConversationIds.length > 0) await sleep(CONFIG.API_DELAY);
     }
 
-    if (failures.length > 0) {
-      // 失败清单落 _failed/（含 ID 与错误），主流程继续；锚点绝不前移 → 下轮自动补齐
-      const runTs = acSyncRunStamp(runAt);
-      const failLines = [`# 自动同步失败清单 ${runTs}`, '', `- 平台: ${id}`, `- 时间: ${formatLocalTime(new Date(runAt))}`, ''];
-      for (const f of failures) {
-        failLines.push(`## ${f.title}`);
-        failLines.push(`- ID: \`${f.id}\``);
-        failLines.push(`- 错误: ${f.error}`);
-        failLines.push(`- 时间: ${formatLocalTime(new Date(runAt))}`);
-        failLines.push('');
-        let failName = `${runTs}-${sanitizeFilename(f.title, 80)}.md`;
-        let n = 2;
-        while (usedFailNames.has(failName)) { failName = `${runTs}-${sanitizeFilename(f.title, 80)}-${n}.md`; n++; }
-        usedFailNames.add(failName);
-        try { await acSyncWriteFile(failedDir, failName, failLines.join('\n')); }
-        catch (e) { console.error('[AC-Sync] 写 _failed 失败:', e); }
-      }
+    // ---- 收尾：欠账统计 + 锚点推进 ----
+    const activePoison = acSyncActivePoisonCount(index);
+    const hasDebt = index.pendingConversationIds.length > 0 || stopFor429 || activePoison > 0;
+    if (hasDebt) {
+      const errParts = [];
+      if (stopFor429) errParts.push('站点限流(429):30min 后自动重试');
+      if (activePoison > 0) errParts.push(`${activePoison} 条多次失败已挂起(24h 后重试)`);
+      const pendingN = index.pendingConversationIds.length;
+      if (pendingN > 0 && !stopFor429) errParts.push(`${pendingN} 条待重试`);
       acSyncSetPlatformStat(id, {
         lastRunAt: runAt,
         lastExported: exported,
-        lastError: failures.map((f) => `${f.title}: ${f.error}`).join(' | ').substring(0, 300),
+        lastError: errParts.join(' | ').substring(0, 300),
         failStreak: acSyncPlatformStat(id).failStreak + 1,
       });
-      return { exported, failed: failures.length };
+      return { exported, failed: poisonCount + (stopFor429 ? 1 : 0), pending: pendingN };
     }
 
-    // 全部成功：锚点前移到 max(本次运行时刻, 新会话最大排序时间)
-    acSyncSaveAnchor(id, Math.max(runAt, maxConvTime));
+    // 全部落定：锚点前移到 max(本次运行时刻, 本轮见到的最大排序时间)
+    acSyncSaveAnchor(id, Math.max(runAt, maxSeenTime));
     acSyncSetPlatformStat(id, { lastRunAt: runAt, lastExported: exported, lastError: null, failStreak: 0 });
     return { exported, failed: 0 };
   }
@@ -368,7 +569,7 @@
     return st;
   }
 
-  // “重置起点(重导)”：删新锚点 + 清 _failed（repair 语义），下一轮按新起点重拉
+  // “重置起点(重导)”：删新锚点 + 清持久化索引 + 清 _failed（repair 语义），下一轮按新起点重拉
   async function acSyncResetAnchor(adapterId) {
     try { localStorage.removeItem(AC_SYNC_ANCHOR_PREFIX + adapterId); } catch (e) { /* 静默 */ }
     acSyncSetPlatformStat(adapterId, { lastError: null, failStreak: 0 });
@@ -378,12 +579,14 @@
       if ((await rootHandle.queryPermission({ mode: 'readwrite' })) !== 'granted') return;
       const platformDir = await rootHandle.getDirectoryHandle(adapterId, { create: false }).catch(() => null);
       if (!platformDir) return;
+      // 索引一并删除：待办队列/已导出登记/毒丸全部作废，避免旧登记挡住重导
+      try { await platformDir.removeEntry(AC_SYNC_INDEX_NAME); } catch (e) { /* 不存在即忽略 */ }
       const failedDir = await platformDir.getDirectoryHandle('_failed', { create: false }).catch(() => null);
       if (!failedDir) return;
       for await (const [name] of failedDir.entries()) {
         await failedDir.removeEntry(name).catch(() => {});
       }
-    } catch (e) { /* _failed 清理失败不影响重导 */ }
+    } catch (e) { /* 清理失败不影响重导 */ }
     acSyncRefreshPanel();
   }
 
@@ -516,7 +719,7 @@
     });
     acSyncPanelEl.appendChild(runItem);
 
-    // 重置起点(重导)：删锚点 + 清 _failed，下轮自动重拉
+    // 重置起点(重导)：删锚点 + 清索引 + 清 _failed，下轮自动重拉
     const resetItem = mkItem('重置起点(重导)', 'reset');
     resetItem.addEventListener('click', async () => {
       try { await acSyncResetAnchor(adapter.id); } catch (err) { console.error('[AC-Sync] 重置起点失败:', err); }
@@ -602,7 +805,7 @@
       console.log('[AC-Sync] runNow 结果:', r);
       return r;
     },
-    /** 重置某平台锚点并清 _failed（repair 语义） */
+    /** 重置某平台锚点并清索引/_failed（repair 语义） */
     async resetAnchor(id) {
       const target = id || acSyncCurrentAdapter()?.id;
       if (!target) return { error: '未指定 adapterId' };

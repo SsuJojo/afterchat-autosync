@@ -12,7 +12,7 @@ C:\Users\SsuJo_\Chats\
 ├── sync.cmd                  # 一键管道：转换 + deja index（计划任务调用这个）
 ├── README.md                 # 本文件
 ├── _inbox\                   # 手动放导出的地方（Takeout zip、官方导出 zip 等）
-├── _sync\                    # AfterChat 自动同步落点：<平台>\ 子目录，转换器递归扫描（_failed\ 跳过）
+├── _sync\                    # AfterChat 自动同步落点：<平台>\ 子目录，转换器递归扫描（_failed\ 与 _sync_index.json 跳过）
 ├── _state\                   # 已处理输入指纹 processed.jsonl + sync.log（日志尾部保留 400 行）
 ├── amp-threads\              # → DEJA_AMP_ROOT     （28 个网页平台对话，Amp thread 格式）
 ├── gemini-home\tmp\Gemini\chats\   # → DEJA_GEMINI_ROOT （Gemini 对话，Gemini CLI jsonl 格式）
@@ -55,7 +55,8 @@ AfterChat 油猴脚本加了常驻同步模块：打开**任意 29 个已适配�
 - **触发时机**：脚本启动 15 秒跑一轮，之后每 10 分钟一轮，从别的标签切回页面也触发（60 秒防抖）；后台页不跑。连续失败会退避，单飞锁防止并发。
 - **平台范围（29 个，全部默认开启）**：M365 Copilot、Microsoft Copilot、腾讯 ima、Z.ai、智谱清言、DuckDuckGo、Perplexity、DeepSeek、通义千问、千问、腾讯元宝、腾讯混元、Kimi、豆包/Dola、MiniMax Agent、Google AI Studio、ChatGPT、Grok(x.com)、Grok Web、Gemini、Google AI Mode、Arena、Mistral、Sakana、Claude、Poe、Monica、StepFun Studio、StepFun Chat。要缩减范围就在同步模块的 `AC_SYNC_PLATFORMS` 数组里删对应 id。
 - **只读导出**：只读取网页对话并写 `_sync` 文件，不会在网站上创建或修改任何对话。
-- **失败与重置起点**：单条拉取失败写进对应平台的 `_failed\<时间>-<标题>.md`，主流程继续；转换器递归扫描 `_sync` 时会跳过所有名为 `_failed` 的目录组件，这些文件不会被摄入。零失败才推进同步锚点。面板里「重置起点(重导)」删锚点并清 `_failed`，下一轮按新起点重拉；因为转换器按 URL 会话 ID + 内容去重，重导在 deja 里是零增量（repair 语义）。
+- **失败与重试**：每平台的待办队列持久化在 `_sync\<平台>\_sync_index.json`，逐条处理、处理一条落一次盘，浏览器崩溃/重启后从索引续传不丢账。单条拉取失败指数退避轮内重试，跨轮累计超限（6 次）转挂起：写 `_failed\<时间>-<标题>.md` 并定时跳过 24h 后自动重试。命中站点限流（429）时本轮即停，平台静默 30 分钟后自动续排，期间批量收窄。转换器递归扫描 `_sync` 时会跳过所有名为 `_failed` 的目录组件，`_sync_index.json` 也按 JSON 门控自动跳过，两者都不会被摄入。有任何欠账（待办/挂起/限流）时同步锚点不推进，下一轮自动补齐。
+- **重置起点(重导)**：面板里「重置起点(重导)」删锚点并清该平台的 `_sync_index.json` 与 `_failed\`，下一轮按新起点重拉；因为转换器按 URL 会话 ID + 内容去重，重导在 deja 里是零增量（repair 语义）。
 
 ## CI / 自动更新
 
