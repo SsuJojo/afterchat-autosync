@@ -4,8 +4,8 @@ r"""
 chat2deja.py — 把 AfterChat 自动同步的网页对话导出转成 deja 本地格式。
 
 输入（按内容自动识别，不靠文件名）：
-  A. ChatGPT 备份插件 zip   — accounts/*/conversations/*.json
-  B. ChatGPT 官方导出 zip   — conversations.json
+  A. 旧版导出 zip   — accounts/*/conversations/*.json
+  B. 旧版官方 zip   — conversations.json
   C. Gemini 官方 Takeout zip/json — 我的活动/Gemini Apps/我的活动记录.json
      新格式(2026+)：title="Prompted <提问>" + details[].url=对话URL + safeHtmlItem[].html=<回复HTML>
      老格式：titleUrl + details Request/Response、userInteractions
@@ -13,7 +13,7 @@ chat2deja.py — 把 AfterChat 自动同步的网页对话导出转成 deja 本�
   E. AfterChat 增量 zip/md — Markdown（## Metadata / - **URL:** … / ### 🧑‍💻 User / ### 🤖 Assistant）
 
 输出（幂等；内容没变就不重写，避免 deja 无谓重读）：
-  amp-threads\<id>.json                                  ChatGPT + 其他 27 个网页平台 → Amp thread (DEJA_AMP_ROOT)
+  amp-threads\<id>.json                                  28 个网页平台 → Amp thread (DEJA_AMP_ROOT)
   gemini-home\tmp\Gemini\chats\<id>.jsonl                Gemini  → Gemini CLI      (DEJA_GEMINI_ROOT)
   grok-home\sessions\<enc-cwd>\<id>\{summary,updates}    Grok    → Grok CLI        (DEJA_GROK_ROOT）
 
@@ -61,11 +61,10 @@ for d in (STATE_DIR, INBOX, SYNC, AMP, GEM, GRK):
 
 TZ = timezone(timedelta(hours=8))  # Asia/Shanghai
 
-CHATGPT_URI = "file:///C:/Users/SsuJo_/Chats/ChatGPT"
+LEGACY_URI = "file:///C:/Users/SsuJo_/Chats/ChatGPT"
 GEMINI_URI = "file:///C:/Users/SsuJo_/Chats/Gemini"
 GROK_CWD = "C:\\Users\\SsuJo_\\Chats\\Grok"
 GROK_ENC = urllib.parse.quote(GROK_CWD, safe="")
-
 # AfterChat 平台 id → 展示名（与 _sync\<id>\ 目录名一致）
 WEB_PLATFORM_NAMES = {
     "m365": "M365 Copilot", "copilot": "Microsoft Copilot", "ima": "腾讯 ima",
@@ -331,9 +330,9 @@ class Writer:
 
 WRITER = Writer()
 
-# ================================================================ A/B: ChatGPT
-def read_chatgpt_conversation(doc):
-    """标准 ChatGPT 后端对话 JSON → (conv_id, title, create_dt, [msgs])；只走 weight=1 主链。"""
+# ================================================================ A/B: legacy exports
+def read_legacy_conversation(doc):
+    """旧版对话 JSON → (conv_id, title, create_dt, [msgs])；只走 weight=1 主链。"""
     mapping = doc.get("mapping") or {}
     if not mapping:
         return None
@@ -360,7 +359,7 @@ def read_chatgpt_conversation(doc):
                 parts = (msg.get("content") or {}).get("parts") or []
                 text = "\n".join(p for p in parts if isinstance(p, str)).strip()
                 if text:
-                    msgs.append(E(role, text, parse_any_time(msg.get("create_time")), "chatgpt"))
+                    msgs.append(E(role, text, parse_any_time(msg.get("create_time")), "legacy"))
         children = node.get("children") or []
         if not children:
             break
@@ -375,17 +374,17 @@ def read_chatgpt_conversation(doc):
         return None
     return conv_id, title, create, msgs
 
-def add_chatgpt_doc(doc):
-    r = read_chatgpt_conversation(doc)
+def add_legacy_doc(doc):
+    r = read_legacy_conversation(doc)
     if not r:
         return 0
     conv_id, title, create, msgs = r
     if not conv_id:
         return 0
-    WRITER.add("amp", str(conv_id), title, CHATGPT_URI, msgs)
+    WRITER.add("amp", str(conv_id), title, LEGACY_URI, msgs)
     return 1
 
-def handle_chatgpt_zip(zf, name):
+def handle_legacy_zip(zf, name):
     n = 0
     for entry in zf.infolist():
         if entry.is_dir() or not entry.filename.endswith(".json"):
@@ -398,10 +397,10 @@ def handle_chatgpt_zip(zf, name):
                 continue
             if isinstance(payload, list):
                 for doc in payload:
-                    n += add_chatgpt_doc(doc)
+                    n += add_legacy_doc(doc)
             else:
-                n += add_chatgpt_doc(payload)
-    log(f"  ChatGPT「{name}」: {n} conversations")
+                n += add_legacy_doc(payload)
+    log(f"  legacy「{name}」: {n} conversations")
     return n
 
 # ================================================================ C: Gemini（官方 Takeout）
@@ -696,7 +695,7 @@ def handle_afterchat_zip(zf, name, platform_hint=None):
     return sum(n.values())
 
 # ================================================================ dispatcher
-ZIP_HINTS = ("chatgpt", "increment", "takeout", "grok", "afterchat", "gemini", "backup", "export", "聊天")
+ZIP_HINTS = ("legacy", "increment", "takeout", "grok", "afterchat", "gemini", "backup", "export", "聊天")
 JSON_HINTS = ("myactivity", "我的活动", "my activity", "grok", "conversations.json")
 JSON_GEMINI_MARKS = (b'"safeHtmlItem"', b'"titleUrl"', b'"userInteractions"', b'"attachedFiles"')
 
@@ -718,7 +717,7 @@ def classify_and_process(path, seen, force=False, platform_hint=None):
                              for x in names)
                 has_md = any(x.lower().endswith(".md") for x in names)
                 if has_cgpt:
-                    kind = "chatgpt"; n = handle_chatgpt_zip(zf, os.path.basename(path))
+                    kind = "legacy"; n = handle_legacy_zip(zf, os.path.basename(path))
                 elif has_grok:
                     kind = "grok-official"; n = handle_grok_zip(zf, os.path.basename(path))
                 elif has_gm:
@@ -797,8 +796,8 @@ def main():
                 continue  # 未知名 zip 不碰
             if low.endswith(".json") and not any(k in low for k in JSON_HINTS):
                 continue  # 散装 json 只认这几种
-            if low.endswith(".md") and "chatgpt" in low and platform_hint is None:
-                continue  # 非同步目录的 ChatGPT md 让专用备份 zip 处理
+            if low.endswith(".md") and "legacy" in low and platform_hint is None:
+                continue  # 非同步目录的 md 不按 legacy 处理
             classify_and_process(full, seen, force, platform_hint)
     counts = WRITER.flush()
     log(f"转换完成: amp={counts['amp']} gemini={counts['gemini']} grok={counts['grok']}"

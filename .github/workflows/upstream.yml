@@ -1,0 +1,51 @@
+name: upstream
+
+on:
+  schedule:
+    # 每 3 小时轮询一次上游 AfterChat
+    - cron: "17 */3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: upstream-follow
+  cancel-in-progress: false
+
+jobs:
+  follow:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Check upstream
+        id: upstream
+        run: python tools/sync_upstream.py
+
+      - name: Commit, tag and push
+        if: steps.upstream.outputs.changed == 'true'
+        env:
+          RELEASE: ${{ steps.upstream.outputs.release }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add vendor/afterchat.user.js version.json
+          if git diff --cached --quiet; then
+            echo "No upstream changes staged."
+            exit 0
+          fi
+          git commit -m "chore(upstream): follow AfterChat ${{ steps.upstream.outputs.upstream }}"
+          if git rev-parse -q --verify "refs/tags/v${RELEASE}" >/dev/null; then
+            echo "Tag v${RELEASE} already exists; skip release trigger."
+            exit 0
+          fi
+          git tag "v${RELEASE}"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
+          git push origin "v${RELEASE}"

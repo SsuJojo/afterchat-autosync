@@ -4,9 +4,6 @@ on:
   push:
     tags:
       - "v*"
-  schedule:
-    # 02:17 UTC = 10:17 Asia/Shanghai
-    - cron: "17 2 * * *"
   workflow_dispatch:
     inputs:
       release:
@@ -26,7 +23,6 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
-      release_built: ${{ steps.built.outputs.built }}
     steps:
       - uses: actions/checkout@v4
 
@@ -37,11 +33,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-
-      - name: Check upstream
-        id: upstream
-        if: github.event_name == 'schedule'
-        run: python tools/sync_upstream.py
 
       - name: Read version
         id: version
@@ -57,39 +48,21 @@ jobs:
           echo "tag mismatch: ${{ github.ref }} != v${{ steps.version.outputs.version }}"
           exit 1
 
-      - name: Commit upstream sync
-        if: github.event_name == 'schedule' && steps.upstream.outputs.changed == 'true'
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add vendor/afterchat.user.js version.json
-          if git diff --cached --quiet; then
-            echo "No upstream changes staged."
-            exit 0
-          fi
-          git commit -m "chore(upstream): sync AfterChat ${{ steps.upstream.outputs.upstream }} -> ${{ steps.upstream.outputs.release }}"
-          git push origin HEAD:"${GITHUB_REF#refs/heads/}"
-
       - name: Build userscript
-        id: built
-        if: github.event_name != 'schedule' || steps.upstream.outputs.changed == 'true'
         run: |
           python tools/patch_afterchat.py \
             --source-file vendor/afterchat.user.js \
             --module tools/ac-sync.module.js \
             --out dist/afterchat-autosync.user.js \
             --version-tag "${{ steps.version.outputs.suffix }}"
-          echo "built=true" >> "$GITHUB_OUTPUT"
 
       - name: Verify userscript
-        if: steps.built.outputs.built == 'true'
         run: |
           python tools/patch_afterchat.py --check --out dist/afterchat-autosync.user.js
           python tools/verify_autosync.py --base .
           node --check dist/afterchat-autosync.user.js
 
       - name: Upload build artifact
-        if: steps.built.outputs.built == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: afterchat-autosync-${{ steps.version.outputs.version }}
@@ -97,17 +70,11 @@ jobs:
           if-no-files-found: error
 
       - name: Create release
-        if: >-
-          steps.built.outputs.built == 'true' &&
-          (
-            github.ref_type == 'tag' ||
-            (github.event_name == 'workflow_dispatch' && inputs.release == true) ||
-            (github.event_name == 'schedule' && steps.upstream.outputs.changed == 'true')
-          )
+        if: github.ref_type == 'tag' || (github.event_name == 'workflow_dispatch' && inputs.release == true)
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "${{ steps.version.outputs.tag }}" \
             dist/afterchat-autosync.user.js \
             --title "AfterChat AutoSync ${{ steps.version.outputs.version }}" \
-            --notes "Automated build. Upstream: ${{ steps.upstream.outputs.upstream || 'unchanged' }}."
+            --notes "Automated build from ${{ github.sha }}."
