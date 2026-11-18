@@ -7,7 +7,7 @@
 ## 目录布局
 
 ```
-C:\Users\SsuJo_\Chats\
+C:\Users\SsuJo_\Documents\GitHub\afterchat-autosync\
 ├── chat2deja.py              # 主转换器（多类输入自动识别）
 ├── sync.cmd                  # 一键管道：转换 + deja index（计划任务调用这个）
 ├── README.md                 # 本文件
@@ -36,7 +36,7 @@ C:\Users\SsuJo_\Chats\
 
 ## 日常使用
 
-**平时什么都不用做。**浏览器打开任意已适配站点（29 个平台），AfterChat 自动同步就把「上次同步之后」的新对话直接写进 `_sync\<平台>\`；两个计划任务（`deja-chat-sync` 22:30、`deja-chat-sync-noon` 12:30）自动扫 `_inbox` + `_sync`，有新文件就转换并 `deja index`。手动跑：双击 `sync.cmd` 或 `Start-ScheduledTask deja-chat-sync`。想马上搜到刚同步的对话，也直接运行 `C:\Users\SsuJo_\Chats\sync.cmd`（增量，几秒到几分钟）。
+**平时什么都不用做。**浏览器打开任意已适配站点（29 个平台），AfterChat 自动同步就把「上次同步之后」的新对话直接写进 `_sync\<平台>\`；两个计划任务（`deja-chat-sync` 22:30、`deja-chat-sync-noon` 12:30）自动扫 `_inbox` + `_sync`，有新文件就转换并 `deja index`。手动跑：双击 `sync.cmd` 或 `Start-ScheduledTask deja-chat-sync`。想马上搜到刚同步的对话，也直接运行 `C:\Users\SsuJo_\Documents\GitHub\afterchat-autosync\sync.cmd`（增量，几秒到几分钟）。
 
 历史导出 zip 放 `_inbox` 即被默认扫描；若留在 Downloads，用 `--with-downloads` 回填一次。
 
@@ -74,7 +74,7 @@ AfterChat 油猴脚本加了常驻同步模块：打开**任意 29 个已适配�
 
 ## 注意事项 / 已知边界
 
-- `setx` 设置的 `DEJA_*_ROOT` 对**已开着的**终端不生效——老终端里手动跑 `deja` 前先 `$env:DEJA_GEMINI_ROOT="C:\Users\SsuJo_\Chats\gemini-home"` 等三行（sync.cmd 内部已带）。**新开终端无此问题。**
+- `setx` 设置的 `DEJA_*_ROOT` 对**已开着的**终端不生效——老终端里手动跑 `deja` 前先 `$env:DEJA_GEMINI_ROOT="C:\Users\SsuJo_\Documents\GitHub\afterchat-autosync\gemini-home"` 等三行（sync.cmd 内部已带）。**新开终端无此问题。**
 - Gemini 官方 Takeout 是活动日志：多数条目只有“提问 + 回复”各一条，追问轮次的用户原文常缺失（标题取首条提问），个别纯图片提问记为 `[图片 N 张]`——这是 Google 导出的固有限制，AfterChat 同步的 md 补齐后有完整对话。
 - 云盘挂载的 `G:\我的云端硬盘\Takeout` 现在只在 `--with-takeout` 时扫，用文件大小+mtime 做指纹（不整份重读 350MB zip）。
 - 手动重新转换所有输入（忽略处理记录）：`python chat2deja.py --force`；处理记录会在每次运行后自动去重压缩。`--with-downloads` / `--with-takeout` 分别临时加上 Downloads / `G:\我的云端硬盘\Takeout` 扫描根，用于一次性回填。查看全部选项：`python chat2deja.py --help`（不写盘）。
@@ -90,7 +90,7 @@ Unregister-ScheduledTask -TaskName "deja-chat-sync","deja-chat-sync-noon" -Confi
 # 从索引移除全部导入对话
 deja forget --harness amp --all; deja forget --harness gemini --all; deja forget --harness grok --all
 # 删数据
-Remove-Item -Recurse -Force C:\Users\SsuJo_\Chats
+Remove-Item -Recurse -Force C:\Users\SsuJo_\Documents\GitHub\afterchat-autosync
 # 清环境变量
 [Environment]::SetEnvironmentVariable("DEJA_AMP_ROOT",$null,"User")  # gemini/grok 同理
 ```

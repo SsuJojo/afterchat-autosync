@@ -1,7 +1,7 @@
 @echo off
 rem sync.cmd - chat2deja pipeline: scan Downloads/_inbox for new exports, convert, then deja index
 setlocal
-set "BASE=C:\Users\SsuJo_\Chats"
+set "BASE=C:\Users\SsuJo_\Documents\GitHub\afterchat-autosync"
 set "PY=C:\Users\SsuJo_\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\python\python.exe"
 set "DEJA_AMP_ROOT=%BASE%\amp-threads"
 set "DEJA_GEMINI_ROOT=%BASE%\gemini-home"

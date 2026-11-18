@@ -25,7 +25,7 @@
   const AC_SYNC_ANCHOR_PREFIX = 'ac-sync-anchor-';    // 新锚点 key 前缀（不写 m365-export-anchor-*）
   const AC_SYNC_DB_NAME = 'acSyncDb';                 // IndexedDB：目录句柄持久化
   const AC_SYNC_DB_STORE = 'handles';
-  const AC_SYNC_ROOT_KEY = 'root';                    // 根目录句柄（用户所选目录，如 C:\Users\SsuJo_\Chats\_sync）
+  const AC_SYNC_ROOT_KEY = 'root';                    // 根目录句柄（用户所选目录，建议独立空目录）
   const AC_SYNC_BOOT_DELAY = 15 * 1000;               // 启动后 15s 跑第一轮
   const AC_SYNC_BASE_INTERVAL = 10 * 60 * 1000;       // 常规间隔 10min
   const AC_SYNC_MAX_BACKOFF = 60 * 60 * 1000;         // 连续失败退避上限 60min
