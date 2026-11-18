@@ -6596,7 +6596,7 @@
     //  ADAPTER[grokcom]  Grok Web (grok.com)
     // ═══════════════════════════════════════════════════════
     // API 说明：
-    //   - 列表：GET /rest/app-chat/conversations?pageSize=60
+    //   - 列表：GET /rest/app-chat/conversations，pageSize=60 + pageToken
     //   - 节点：GET /rest/app-chat/conversations/{id}/response-node
     //   - 详情：POST /rest/app-chat/conversations/{id}/load-responses
     // 认证：同域 Cookie（credentials: 'include' 自动发送），无需额外 header。
@@ -6720,19 +6720,32 @@
       async getAllConversations(onProgress) {
         const allChats = [];
         const limit = CONFIG.DEBUG_LIMIT || Infinity;
-        const resp = await fetch('/rest/app-chat/conversations?pageSize=60', { credentials: 'include' });
-        if (!resp.ok) throw new Error(`Grok 列表请求失败: HTTP ${resp.status}`);
-        const data = await resp.json();
-        const list = data?.conversations || [];
-        for (const c of list) {
-          allChats.push({
-            id: c.conversationId,
-            title: c.title || 'untitled',
-            createTimeUtc: c.createTime ? new Date(c.createTime).getTime() : Date.now(),
-            updateTimeUtc: c.modifyTime ? new Date(c.modifyTime).getTime() : Date.now(),
-          });
+        const seen = new Set();
+        let pageToken = '';
+        while (allChats.length < limit) {
+          const params = new URLSearchParams({ pageSize: '60' });
+          if (pageToken) params.set('pageToken', pageToken);
+          const resp = await fetch(`/rest/app-chat/conversations?${params.toString()}`, { credentials: 'include' });
+          if (!resp.ok) throw new Error(`Grok 列表请求失败: HTTP ${resp.status}`);
+          const data = await resp.json();
+          const list = data?.conversations || [];
+          if (!list.length) break;
+          for (const c of list) {
+            const id = c.conversationId;
+            if (!id || seen.has(id)) continue;
+            seen.add(id);
+            allChats.push({
+              id,
+              title: c.title || 'untitled',
+              createTimeUtc: c.createTime ? new Date(c.createTime).getTime() : Date.now(),
+              updateTimeUtc: c.modifyTime ? new Date(c.modifyTime).getTime() : Date.now(),
+            });
+          }
+          if (onProgress) onProgress(allChats.length);
+          pageToken = data?.nextPageToken || '';
+          if (!pageToken) break;
+          await sleep(CONFIG.API_PAGE_DELAY);
         }
-        if (onProgress) onProgress(allChats.length);
         return allChats.slice(0, limit);
       },
 
@@ -6743,7 +6756,9 @@
         const nodeData = await nodeResp.json();
         const nodes = nodeData?.responseNodes || [];
         const responseIds = nodes.map((n) => n.responseId).filter(Boolean);
-        if (!responseIds.length) throw new Error('对话未包含消息节点');
+        if (!responseIds.length) {
+          return { conversation_id: id, title: '', createTime: null, responses: [], empty: true };
+        }
 
         // 2. load-responses 批量获取详情
         const loadResp = await fetch(`/rest/app-chat/conversations/${id}/load-responses`, {

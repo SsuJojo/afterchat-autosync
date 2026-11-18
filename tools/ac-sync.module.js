@@ -39,7 +39,7 @@
   const AC_SYNC_RETRY_JITTER = 2 * 1000;              // 单条重试退避抖动
   const AC_SYNC_ATTEMPT_CAP = 6;                      // 单条跨轮尝试上限（超过转毒丸）
   const AC_SYNC_SKIP_AFTER_POISON = 24 * 60 * 60 * 1000; // 毒丸后的定时跳过窗口
-  const AC_SYNC_DRAIN_BATCH_STABLE = 2;               // 常规小批量排水条数
+  const AC_SYNC_DRAIN_BATCH_STABLE = 60;              // 常规小批量排水条数
   const AC_SYNC_EXPORTED_CAP = 2000;                  // 已导出登记上限（防索引无限膨胀）
 
   // ---- 状态层：localStorage ac-sync-state = { dirName, enabled, platforms: {...} } ----
@@ -347,6 +347,10 @@
       for (let attempt = 0; attempt <= AC_SYNC_IN_ROUND_RETRIES; attempt++) {
         try {
           const data = await adapter.getConversationDetails(cid);
+          if (data?.empty === true) {
+            ok = true;
+            break;
+          }
           if (data?.store) delete data.store.zeroQuery;
           const chatTitle = getChatTitle(data, snap.title || 'untitled');
           if (typeof adapter.toMarkdown !== 'function') throw new Error('适配器不支持 toMarkdown');
@@ -372,10 +376,10 @@
         index.pendingConversationIds.shift();
         delete index.pendingConversations[cid];
         acSyncRegisterExported(index, cid, snap.t === null ? runAt : snap.t);
-        acSyncPushFilename(index, newFilename);
+        if (newFilename) acSyncPushFilename(index, newFilename);
         // 成功缓存一份限流压力（与 DC noteSuccess 同语义）
         index.recent429Count = Math.max(0, (index.recent429Count || 0) - 1);
-        exported++;
+        if (newFilename) exported++;
         processed++;
         await acSyncWriteIndex(platformDir, index);
       } else if (was429) {
