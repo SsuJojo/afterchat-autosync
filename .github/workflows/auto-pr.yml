@@ -104,7 +104,7 @@ jobs:
           {
             echo "## 摘要 / Summary"
             echo
-            echo "自动为独立分支 \`$BRANCH\` 创建的 PR。油猴版与 MV3 插件版由同一份 `tools/ac-sync.module.js` 构建。"
+            echo "自动为独立分支 \`$BRANCH\` 创建的 PR。油猴版与 MV3 插件版由同一份 tools/ac-sync.module.js 构建。"
             echo
             echo "Auto-created PR for branch \`$BRANCH\`. The userscript and MV3 extension share one sync module."
             echo
@@ -143,6 +143,8 @@ jobs:
     needs: validate
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+
       - name: Post automatic review comment
         shell: bash
         run: |
