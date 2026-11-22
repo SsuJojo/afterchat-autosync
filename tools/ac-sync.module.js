@@ -32,7 +32,7 @@
   const AC_SYNC_MAX_BACKOFF = 60 * 60 * 1000;         // 连续失败退避上限 60min
   const AC_SYNC_VISIBLE_DEBOUNCE = 60 * 1000;         // 回前台触发防抖 60s
   const AC_SYNC_INDEX_NAME = '_sync_index.json';      // 每平台持久化索引：待办队列/已导出登记（崩溃可续传）
-  const AC_SYNC_INDEX_VERSION = 2;
+  const AC_SYNC_INDEX_VERSION = 4;
   const AC_SYNC_429_BACKOFF = 30 * 60 * 1000;         // 命中限流后的平台静默期
   const AC_SYNC_IN_ROUND_RETRIES = 2;                 // 单条轮内限流重试次数
   const AC_SYNC_RETRY_BASE = 5 * 1000;                // 单条重试退避基数
@@ -247,6 +247,7 @@
       exportedConversations: {},
       exportOrder: [],
       exportedFilenames: [],
+      exportedFiles: {},
       pendingConversationIds: [],
       pendingConversations: {},
       poison: {},
@@ -264,6 +265,8 @@
     }
     if (Array.isArray(raw.exportOrder)) idx.exportOrder = raw.exportOrder.filter((s) => typeof s === 'string');
     if (Array.isArray(raw.exportedFilenames)) idx.exportedFilenames = raw.exportedFilenames.filter((s) => typeof s === 'string');
+    // v2 索引没有单会话文件名映射；升级后首次重导出按“标题相同且时间前缀不同”清旧文件
+    if (raw.exportedFiles && typeof raw.exportedFiles === 'object') idx.exportedFiles = raw.exportedFiles;
     if (Array.isArray(raw.pendingConversationIds)) idx.pendingConversationIds = raw.pendingConversationIds.filter((s) => typeof s === 'string' && s);
     if (raw.pendingConversations && typeof raw.pendingConversations === 'object') idx.pendingConversations = raw.pendingConversations;
     if (raw.poison && typeof raw.poison === 'object') idx.poison = raw.poison;
@@ -287,12 +290,26 @@
     await acSyncWriteFile(platformDir, AC_SYNC_INDEX_NAME, JSON.stringify(index, null, 2));
   }
 
-  function acSyncRegisterExported(index, cid, t) {
+  async function acSyncRemoveExportedFile(platformDir, filename) {
+    if (!filename) return;
+    try { await platformDir.removeEntry(filename); }
+    catch (e) { /* 文件已被用户移走：忽略 */ }
+  }
+
+  async function acSyncRegisterExported(index, platformDir, cid, t, filename) {
+    const oldFilename = index.exportedFiles[cid];
+    if (oldFilename && oldFilename !== filename) {
+      await acSyncRemoveExportedFile(platformDir, oldFilename);
+      const i = index.exportedFilenames.indexOf(oldFilename);
+      if (i >= 0) index.exportedFilenames.splice(i, 1);
+    }
     if (!(cid in index.exportedConversations)) index.exportOrder.push(cid);
     index.exportedConversations[cid] = t;
+    if (filename) index.exportedFiles[cid] = filename;
     if (index.exportOrder.length > AC_SYNC_EXPORTED_CAP) {
       const drop = index.exportOrder.splice(0, index.exportOrder.length - AC_SYNC_EXPORTED_CAP);
       for (const d of drop) delete index.exportedConversations[d];
+      for (const d of drop) delete index.exportedFiles[d];
     }
   }
 
@@ -301,6 +318,57 @@
     if (index.exportedFilenames.length > AC_SYNC_EXPORTED_CAP) {
       index.exportedFilenames.splice(0, index.exportedFilenames.length - AC_SYNC_EXPORTED_CAP);
     }
+  }
+
+  // v2 索引按会话 ID 登记、但不记文件名；首次升级到 v4 时按 Markdown 里的 URL
+  // 回扫本平台旧文件，为已登记会话建立 ID → 文件名映射，并清掉同 ID 的历史版本。
+  async function acSyncUpgradeExportedFiles(platformDir, index) {
+    if (index.v >= 3) return;
+    const mdNames = index.exportedFilenames.filter((fn) => fn.endsWith('.md'));
+    const groups = new Map();
+    for (const fn of mdNames) {
+      let text;
+      try {
+        const fh = await platformDir.getFileHandle(fn, { create: false });
+        text = await (await fh.getFile()).text();
+      } catch (e) { continue; }
+      const m = text.match(/^\s*-\s*\*\*URL:\*\*\s*(\S+)/m);
+      if (!m) continue;
+      const cid = acSyncConversationIdFromUrl(m[1]);
+      if (!cid || !(cid in index.exportedConversations)) continue;
+      const t = parseStartInput(index.exportedConversations[cid]);
+      const stamp = Number.isFinite(t) ? acSyncRunStamp(t) : '';
+      const entry = groups.get(cid) || { stamp, names: [] };
+      entry.names.push({ name: fn, current: stamp && fn.startsWith(`${stamp}-`) });
+      groups.set(cid, entry);
+    }
+    for (const [cid, group] of groups) {
+      const current = group.names.find((x) => x.current) || group.names[0];
+      index.exportedFiles[cid] = current.name;
+      for (const x of group.names) {
+        if (x.name === current.name) continue;
+        await acSyncRemoveExportedFile(platformDir, x.name);
+        const i = index.exportedFilenames.indexOf(x.name);
+        if (i >= 0) index.exportedFilenames.splice(i, 1);
+      }
+    }
+    index.v = 4;
+    await acSyncWriteIndex(platformDir, index);
+  }
+
+  // Markdown 的 URL 是平台会话链接；只要能从链接里取出稳定 ID，就能对上索引键。
+  function acSyncConversationIdFromUrl(url) {
+    const s = String(url || '');
+    const patterns = [
+      /\/c\/([a-zA-Z0-9_-]+)/,
+      /[?&](?:conversation|chat)=([a-zA-Z0-9_-]+)/,
+      /\/app\/([a-zA-Z0-9_-]+)/,
+    ];
+    for (const re of patterns) {
+      const m = s.match(re);
+      if (m) return m[1];
+    }
+    return '';
   }
 
   // 限流识别：适配器把 HTTP 状态码拼进错误文本（无独立 status/Retry-After 可读），
@@ -360,6 +428,7 @@
 
     const platformDir = await rootHandle.getDirectoryHandle(id, { create: true });
     const index = await acSyncReadIndex(platformDir, id);
+    await acSyncUpgradeExportedFiles(platformDir, index);
 
     // 平台限流静默期未到：本轮整轮跳过（队列保留，到期自动续）
     if (Number(index.backoffUntil) > Date.now()) {
@@ -417,6 +486,7 @@
     const failedDir = await platformDir.getDirectoryHandle('_failed', { create: true });
     const usedNames = new Set(index.exportedFilenames);
     const usedFailNames = new Set();
+    const drained = new Set();
     let exported = 0;
     let processed = 0;
     let poisonCount = 0;
@@ -427,6 +497,11 @@
 
     while (index.pendingConversationIds.length > 0 && processed < batch && !stopFor429) {
       const cid = index.pendingConversationIds[0];
+      if (drained.has(cid)) {
+        index.pendingConversationIds.shift();
+        continue;
+      }
+      drained.add(cid);
       const snap = index.pendingConversations[cid] || { title: 'untitled', t: null, attempts: 0 };
       let ok = false;
       let newFilename = '';
@@ -464,7 +539,7 @@
       if (ok) {
         index.pendingConversationIds.shift();
         delete index.pendingConversations[cid];
-        acSyncRegisterExported(index, cid, snap.t === null ? runAt : snap.t);
+        await acSyncRegisterExported(index, platformDir, cid, snap.t === null ? runAt : snap.t, newFilename || null);
         if (newFilename) acSyncPushFilename(index, newFilename);
         // 成功缓存一份限流压力（与 DC noteSuccess 同语义）
         index.recent429Count = Math.max(0, (index.recent429Count || 0) - 1);
