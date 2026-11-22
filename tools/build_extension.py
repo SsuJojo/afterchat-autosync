@@ -25,10 +25,20 @@ MANIFEST = REPO_ROOT / "extension" / "manifest.json"
 OUT = REPO_ROOT / "extension" / "patched.user.js"
 
 RE_MATCH = re.compile(r"^//\s*@match\s+(\S+)\s*$", re.MULTILINE)
+RE_EXTENSION_VERSION = re.compile(r"^\d+(?:\.\d+){0,3}$")
 
 
 def read_text(path: Path) -> str:
     return path.read_bytes().decode("utf-8-sig", errors="replace").replace("\r\n", "\n")
+
+
+def extension_version(release: str) -> str:
+    version = release.split("-", 1)[0]
+    if not RE_EXTENSION_VERSION.fullmatch(version):
+        raise ValueError(f"release {release!r} has no valid Chrome extension version")
+    if any(int(part) > 65535 for part in version.split(".")):
+        raise ValueError(f"Chrome extension version out of range: {version}")
+    return version
 
 
 def main() -> int:
@@ -44,13 +54,19 @@ def main() -> int:
             return 1
 
     release = json.loads(read_text(VERSION_FILE))["release"]
+    try:
+        expected_version = extension_version(release)
+    except ValueError as e:
+        print(str(e), file=sys.stderr)
+        return 1
     manifest = json.loads(read_text(MANIFEST))
-    if args.sync_version and manifest.get("version") != release:
-        manifest["version"] = release
+    if args.sync_version and manifest.get("version") != expected_version:
+        manifest["version"] = expected_version
         MANIFEST.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        print(f"synced manifest version -> {release}")
-    elif manifest.get("version") != release:
-        print(f"version mismatch: manifest {manifest.get('version')} != version.json {release}; "
+        print(f"synced manifest version -> {expected_version} (release {release})")
+    elif manifest.get("version") != expected_version:
+        print(f"version mismatch: manifest {manifest.get('version')} != extension version {expected_version} "
+              f"(from release {release}); "
               "run with --sync-version", file=sys.stderr)
         return 1
 

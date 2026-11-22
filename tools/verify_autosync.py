@@ -161,8 +161,11 @@ if os.path.isfile(EXT_MANIFEST):
             release = json.loads(text(VERSION_FILE) or "{}").get("release")
         except Exception:
             release = None
-        check("extension: version matches version.json", m.get("version") == release,
-              f"manifest={m.get('version')} version.json={release}")
+        extension_version = release.split("-", 1)[0] if release else None
+        check("extension: Chrome-valid version matches release core",
+              bool(re.fullmatch(r"\d+(?:\.\d+){0,3}", str(m.get("version", "")))) and
+              m.get("version") == extension_version,
+              f"manifest={m.get('version')} release={release}")
         check("extension: MAIN world bridge", any(
             s.get("world") == "MAIN" and s.get("js") == ["page-bridge.js"]
             for s in m.get("content_scripts", [])))
