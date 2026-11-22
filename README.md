@@ -50,8 +50,10 @@ C:\Users\SsuJo_\Documents\GitHub\afterchat-autosync\
 AfterChat 油猴脚本加了常驻同步模块：打开**任意 29 个已适配站点**就把「上次同步之后」的新对话直接写进 `_sync\<平台>\`，不再下载 zip、不进 Downloads。浏览器不开就不同步；deja 12:30 / 22:30 两班索引兜底。
 
 - **安装 / 升级**：直接从 GitHub Releases 安装 `afterchat-autosync.user.js`。产物已写 `@updateURL` / `@downloadURL` 指向 latest Release；CI 每 3 小时跟随上游 AfterChat，发现新版自动构建并发 Release，Tampermonkey 通常会在之后自动升级。若要本地构建：`python tools/patch_afterchat.py` 会用 `vendor/afterchat.user.js` + `tools/ac-sync.module.js` 生成 `dist/afterchat-autosync.user.js`（在 `try { initialize(); }` 注入口前注入，同名同 namespace，可直接覆盖旧脚本槽位）。
-- **首次启用**：在任意支持站点点右下角导出按钮左侧的 `⇅` 小圆钮 → 面板里「开启自动同步」→ 选目录。建议选一个空目录（首次先手工建好）；多人共用一台机器可各自选别的目录。每个平台在所选目录下建 `<平台>\` 与 `<平台>\_failed\`。换目录用面板里「更换目录」，锚点保留、文件同名覆盖，不会重导。
-- **权限**：选目录时浏览器授予一次；重启浏览器后可能需要再点 `⇅` → 「立即同步」完成一次授权（浏览器要求手势，脚本不会自动弹窗）。
+- **首次启用**：在任意支持站点点右下角导出按钮左侧的 `⇅` 小圆钮 → 面板里「开启自动同步」→ 选目录。建议选一个空目录（首次先手工建好）；多人共用一台机器可各自选别的目录。每个平台在所选目录下建 `<平台>\` 与 `<平台>\_failed\`。
+- **少选一次目录（同站点复用）**：目录句柄存在本站点浏览器里（IndexedDB）。同一站点再次点「开启自动同步」会直接复用已选目录，**不再弹目录选择器**；面板里的「选择目录」也是复用优先（无存档或复用失败才弹选择器），「更换目录」则总是弹选择器换到别的目录。选择器带固定 `id`（`ac-sync-root`），浏览器会记住该站点上次所选目录，下次选择默认停在原处。锚点保留、文件同名覆盖，重绑不会重导。
+- **跨站限制（浏览器规则，绕不开）**：目录句柄按站点隔离，浏览器不允许跨域名传递或复用——在 ChatGPT 站选过的目录，Grok / Gemini 站仍要各选一次（29 个站点各选一次）。这不是脚本偷懒：File System Access 的句柄和 `showDirectoryPicker({ id })` 的记忆都是按源（origin）保存的，跨站 `postMessage` 传句柄会被浏览器拒绝，权限请求也要求同源页+用户手势。要真正做到「全站只选一次」得加本地桥接服务或浏览器扩展，当前油猴脚本形态做不到。重选时默认停在上次目录，只需点一下确认，已经把操作压到最少。
+- **权限**：选目录时浏览器授予一次；重启浏览器后可能需要再点 `⇅` → 「立即同步」完成一次授权（浏览器要求手势，脚本不会自动弹窗）。部分 Chrome/Edge 版本在授权时勾选「每次访问都允许」，可省掉重启后的再次授权。
 - **触发时机**：脚本启动 15 秒跑一轮，之后每 10 分钟一轮，从别的标签切回页面也触发（60 秒防抖）；后台页不跑。连续失败会退避，单飞锁防止并发。
 - **平台范围（29 个，全部默认开启）**：M365 Copilot、Microsoft Copilot、腾讯 ima、Z.ai、智谱清言、DuckDuckGo、Perplexity、DeepSeek、通义千问、千问、腾讯元宝、腾讯混元、Kimi、豆包/Dola、MiniMax Agent、Google AI Studio、ChatGPT、Grok(x.com)、Grok Web、Gemini、Google AI Mode、Arena、Mistral、Sakana、Claude、Poe、Monica、StepFun Studio、StepFun Chat。要缩减范围就在同步模块的 `AC_SYNC_PLATFORMS` 数组里删对应 id。
 - **只读导出**：只读取网页对话并写 `_sync` 文件，不会在网站上创建或修改任何对话。

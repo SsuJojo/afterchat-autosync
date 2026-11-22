@@ -76,6 +76,12 @@ if mod:
         r"AC_SYNC_BOOT_DELAY\s*=\s*15\s*\*\s*1000", mod)))
     check("module: single-flight lock", bool(re.search(r"syncing|inFlight|running", mod, re.I)))
     check("module: diagnostics hook", "__AC_SYNC__" in mod)
+    check("module: stable picker id",
+          "AC_SYNC_PICKER_ID" in mod and "showDirectoryPicker({ id: AC_SYNC_PICKER_ID" in mod)
+    check("module: explicit select-directory action", "acSyncSelectDirectory" in mod and "选择目录" in mod)
+    check("module: enable accepts reusable handle", "async function acSyncEnableSync(handle)" in mod)
+    check("module: rebind forces fresh picker", bool(re.search(
+        r"async function acSyncChangeDirectory\(\)[\s\S]{0,200}acSyncPickDirectory", mod)))
 
 patch = text(PATCH) or ""
 if patch:
@@ -115,6 +121,7 @@ if os.path.isfile(OUT):
     check("built: version suffix", bool(re.search(r"// @version\s+\S+-ac\d+", out)))
     check("built: auto update metadata", "@updateURL" in out and "@downloadURL" in out)
     check("built: contains module", "showDirectoryPicker" in out)
+    check("built: stable picker id", "AC_SYNC_PICKER_ID" in out)
 else:
     print("SKIP built userscript checks (not generated yet)")
 

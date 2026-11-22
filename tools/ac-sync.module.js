@@ -26,6 +26,7 @@
   const AC_SYNC_DB_NAME = 'acSyncDb';                 // IndexedDB：目录句柄持久化
   const AC_SYNC_DB_STORE = 'handles';
   const AC_SYNC_ROOT_KEY = 'root';                    // 根目录句柄（用户所选目录，建议独立空目录）
+  const AC_SYNC_PICKER_ID = 'ac-sync-root';           // 目录选择器稳定 id：浏览器按站点记住上次所选目录
   const AC_SYNC_BOOT_DELAY = 15 * 1000;               // 启动后 15s 跑第一轮
   const AC_SYNC_BASE_INTERVAL = 10 * 60 * 1000;       // 常规间隔 10min
   const AC_SYNC_MAX_BACKOFF = 60 * 60 * 1000;         // 连续失败退避上限 60min
@@ -531,27 +532,34 @@
   });
 
   // =============================================================
-  //  启用 / 关闭 / 更换目录（showDirectoryPicker 只在用户点击回调里调用）
+  //  启用 / 关闭 / 选择 / 更换目录（showDirectoryPicker 只在用户点击回调里调用）
+  //  目录句柄按站点隔离（IndexedDB acSyncDb）：同站点启用可复用免重选；
+  //  跨站点浏览器不允许传递句柄，各站点需各选一次（选择器 id 记住上次位置）
   //  =============================================================
-  async function acSyncEnableSync() {
+  async function acSyncPickDirectory() {
     if (typeof window.showDirectoryPicker !== 'function') {
       throw new Error('当前浏览器不支持文件系统目录访问（需 Chrome/Edge 122+）');
     }
-    // 用户手势内弹出目录选择器；提示文案只建议 _sync 目录，不硬编码为写入路径
-    const handle = await window.showDirectoryPicker({ mode: 'readwrite', startIn: 'documents' });
+    // 用户手势内弹出目录选择器；稳定 id 让浏览器记住上次所选目录，下次默认停在原目录
+    const handle = await window.showDirectoryPicker({ id: AC_SYNC_PICKER_ID, mode: 'readwrite', startIn: 'documents' });
     const granted = await handle.requestPermission({ mode: 'readwrite' });
     if (granted !== 'granted') throw new Error('未获得目录读写权限');
+    return handle;
+  }
+
+  async function acSyncEnableSync(handle) {
+    const root = handle || await acSyncPickDirectory();
 
     // 为每个启用平台建 <id>\ 与 <id>\_failed\ 子目录
     for (const id of AC_SYNC_PLATFORMS) {
-      const platformDir = await handle.getDirectoryHandle(id, { create: true });
+      const platformDir = await root.getDirectoryHandle(id, { create: true });
       await platformDir.getDirectoryHandle('_failed', { create: true });
       acSyncMigrateAnchor(id);   // 首次启用：迁移旧 m365-export-anchor（新 key 已存在则跳过）
     }
 
-    await acSyncStoreHandle(handle);
+    await acSyncStoreHandle(root);
     const st = acSyncReadState();
-    st.dirName = handle.name || '';
+    st.dirName = root.name || '';
     st.enabled = true;
     acSyncWriteState(st);
     acSyncNeedsAuth = false;
@@ -568,9 +576,26 @@
     acSyncRefreshPanel();
   }
 
+  // “选择目录”：优先复用本站点已存句柄（不再弹选择器）；无存档/授权或复用失败才弹出选择器
+  async function acSyncSelectDirectory() {
+    const saved = await acSyncGetHandle().catch(() => null);
+    if (saved) {
+      try {
+        let perm = 'prompt';
+        try { perm = await saved.queryPermission({ mode: 'readwrite' }); } catch (e) { perm = 'denied'; }
+        if (perm !== 'granted') perm = await saved.requestPermission({ mode: 'readwrite' });
+        if (perm === 'granted') {
+          try { return await acSyncEnableSync(saved); } catch (e) { /* 句柄失效（目录被删/移动）→ 重新选择 */ }
+        }
+      } catch (e) { /* 授权失败 → 重新选择 */ }
+    }
+    return acSyncEnableSync();
+  }
+
+  // “更换目录”：总是弹出选择器重选；锚点保留，同名覆盖幂等
   async function acSyncChangeDirectory() {
-    const st = await acSyncEnableSync();   // 重选目录后重绑句柄；锚点保留，同名覆盖幂等
-    return st;
+    const handle = await acSyncPickDirectory();
+    return acSyncEnableSync(handle);
   }
 
   // “重置起点(重导)”：删新锚点 + 清持久化索引 + 清 _failed（repair 语义），下一轮按新起点重拉
@@ -617,7 +642,7 @@
     acSyncStatusEl.textContent = '';
     const line1 = document.createElement('div');
     if (!st.enabled) {
-      line1.textContent = '自动同步: 关';
+      line1.textContent = st.dirName ? '自动同步: 关（开启时直接复用目录）' : '自动同步: 关';
       line1.style.color = '#888888';
     } else if (!st.dirName) {
       line1.textContent = '自动同步: 未选目录';
@@ -688,13 +713,13 @@
       return item;
     };
 
-    // 开启/关闭：开启流程内含 showDirectoryPicker + requestPermission（均为用户手势内）
+    // 开启/关闭：开启时优先复用已选目录（不弹选择器）；无存档才在用户手势内弹 showDirectoryPicker
     const toggleItem = mkItem('开启自动同步', 'toggle');
     toggleItem.addEventListener('click', async () => {
       const st = acSyncReadState();
       try {
         if (st.enabled) { acSyncDisableSync(); }
-        else { await acSyncEnableSync(); }
+        else { await acSyncSelectDirectory(); }
       } catch (err) {
         if (err?.name !== 'AbortError') console.error('[AC-Sync] 切换自动同步失败:', err);
       }
@@ -731,7 +756,18 @@
     });
     acSyncPanelEl.appendChild(resetItem);
 
-    // 更换目录：重选后重绑句柄，锚点保留
+    // 选择目录：复用已存句柄直接启用（不弹选择器）；无存档/复用失败才弹
+    const selectItem = mkItem('选择目录', 'select');
+    selectItem.addEventListener('click', async () => {
+      try { await acSyncSelectDirectory(); }
+      catch (err) {
+        if (err?.name !== 'AbortError') console.error('[AC-Sync] 选择目录失败:', err);
+      }
+      acSyncBuildPanel(adapter);
+    });
+    acSyncPanelEl.appendChild(selectItem);
+
+    // 更换目录：总是弹选择器重选后重绑句柄，锚点保留
     const rebindItem = mkItem('更换目录', 'rebind');
     rebindItem.addEventListener('click', async () => {
       try { await acSyncChangeDirectory(); }
@@ -815,6 +851,12 @@
       if (!target) return { error: '未指定 adapterId' };
       await acSyncResetAnchor(target);
       return { ok: true, adapterId: target };
+    },
+    /** 选择目录：优先复用已存句柄直接启用；无存档/复用失败才弹选择器（需用户手势） */
+    async selectDirectory() {
+      const r = await acSyncSelectDirectory();
+      console.log('[AC-Sync] selectDirectory 结果:', r);
+      return r;
     },
   };
 
