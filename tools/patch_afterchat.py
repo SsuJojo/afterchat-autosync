@@ -41,6 +41,7 @@ RE_INJECT = re.compile(r"^\s*try\s*\{\s*initialize\(\)\s*;\s*\}\s*catch\s*(\(\s*
 FALLBACK_COMMENT = "// ---- 启动"
 # 版本后缀 -acN（幂等剥离用）
 RE_VERSION_TAG_SUFFIX = re.compile(r"-ac\d+$", re.IGNORECASE)
+RE_VERSION = re.compile(r"^\d+(?:\.\d+){1,3}$")
 AUTO_SYNC_NOTE = "（含 AC AutoSync 自动同步模块）"
 
 
@@ -137,7 +138,7 @@ def build_block(module_text: str) -> list:
 
 
 def bump_version(lines: list, tag: str) -> tuple:
-    """@version 追加 -<tag>，幂等。返回 (新行列表, 旧版本, 新版本)。"""
+    """@version 写入发布版本，幂等。tag 可为 acN 后缀或完整版本号。返回 (新行列表, 旧版本, 新版本)。"""
     out = []
     old = new = None
     for ln in lines:
@@ -145,7 +146,7 @@ def bump_version(lines: list, tag: str) -> tuple:
         if m and new is None:
             old = m.group(2)
             base = RE_VERSION_TAG_SUFFIX.sub("", old)
-            new = f"{base}-{tag}"
+            new = tag if RE_VERSION.fullmatch(tag) else f"{base}-{tag}"
             out.append(f"{m.group(1)}{new}")
         else:
             out.append(ln)
@@ -287,11 +288,13 @@ def check(args) -> int:
         reasons.append(f"@version 行数量为 {len(ver_lines)}（应恰为 1）")
     else:
         ver = ver_lines[0].split("// @version", 1)[1].strip()
-        if not re.search(r"-ac\d+$", ver, re.IGNORECASE):
+        if not RE_VERSION.fullmatch(ver) and not re.search(r"-ac\d+$", ver, re.IGNORECASE):
             ok = False
-            reasons.append(f"@version `{ver}` 缺少 -acN 后缀")
-        elif args.version_tag and not ver.lower().endswith(f"-{args.version_tag.lower()}"):
-            reasons.append(f"注意: 版本后缀不是 -{args.version_tag} 而是整个 `{ver}`（仅提示）")
+            reasons.append(f"@version `{ver}` 不是完整版本号或 -acN 后缀")
+        elif args.version_tag and ver.lower().endswith(f"-{args.version_tag.lower()}"):
+            pass
+        elif args.version_tag and not (RE_VERSION.fullmatch(args.version_tag) and args.version_tag == ver):
+            reasons.append(f"注意: 版本 `{ver}` 与标签 `{args.version_tag}` 不一致（仅提示）")
 
     # 自动更新元数据
     for key, expected in (("updateURL", args.update_url), ("downloadURL", args.download_url)):
@@ -339,7 +342,7 @@ def main(argv=None) -> int:
     p.add_argument("--out", default=DEFAULT_OUT,
                    help=f"输出路径（默认 {DEFAULT_OUT}）")
     p.add_argument("--version-tag", default=DEFAULT_VERSION_TAG,
-                   help=f"@version 后缀标签（默认 {DEFAULT_VERSION_TAG}，产物形如 1.24.1-ac2）")
+                   help=f"@version 后缀标签或完整版本（默认 {DEFAULT_VERSION_TAG}；如 ac6 或 1.24.2）")
     p.add_argument("--update-url", default=DEFAULT_UPDATE_URL,
                    help=f"写入 @updateURL 的稳定地址（默认 GitHub latest Release）")
     p.add_argument("--download-url", default=DEFAULT_DOWNLOAD_URL,

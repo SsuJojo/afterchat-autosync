@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "AfterChat AutoSync Console",
-  "version": "1.24.1",
+  "version": "1.24.2",
   "description": "一次选择同步目录，供全部 AfterChat 站点共用，并提供已同步聊天控制台。",
   "permissions": ["storage", "scripting"],
   "host_permissions": [

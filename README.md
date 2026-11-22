@@ -51,7 +51,7 @@ AfterChat 油猴脚本加了常驻同步模块：打开**任意 29 个已适配�
 
 ### 推荐：MV3 扩展（一次选目录 + 控制台）
 
-- **构建 / 加载**：`python -X utf8 tools/patch_afterchat.py --version-tag ac6` 生成 `dist\afterchat-autosync.user.js`，再 `python -X utf8 tools/build_extension.py --sync-version` 同步扩展包并复制成 `extension\patched.user.js`。扩展清单使用 Chrome 兼容的纯数字版本（如 `1.24.1`），Release 后缀（如 `-ac6`）仅用于发布标识。在 Edge / Chrome 的 `edge://extensions` / `chrome://extensions` 打开开发者模式 → 加载已解压的扩展 → 选 `extension\` 目录。扩展没打包上架，本地加载即可。
+- **构建 / 加载**：`python -X utf8 tools/patch_afterchat.py --version-tag 1.24.2` 生成 `dist\afterchat-autosync.user.js`，再 `python -X utf8 tools/build_extension.py --sync-version` 同步扩展包并复制成 `extension\patched.user.js`。扩展清单使用 Chrome 兼容的纯数字版本（如 `1.24.2`）。在 Edge / Chrome 的 `edge://extensions` / `chrome://extensions` 打开开发者模式 → 加载已解压的扩展 → 选 `extension\` 目录。扩展没打包上架，本地加载即可。
 - **首次使用**：点工具栏扩展图标 → 控制台里「选择/更换目录」→ 打开或刷新任意已适配站点，在 `⇅` 面板点「开启自动同步」。目录句柄存在**扩展自己的** IndexedDB（`acSyncExtDb/handles/root`），29 个站点共用同一个，不再逐站重选。
 - **控制台**：工具栏图标打开，显示当前目录、「最近聊天」（平台 / 时间 / 标题，点一行看前 200 行对话内容）与各平台文件数、待处理数，15 秒自动刷新。只读查看，刻意不做「一键全开」。
 - **为什么扩展能做到**：`showDirectoryPicker` 只在扩展页面里由手势调用，句柄存在扩展源；站点的 MAIN-world 内容脚本注入同一份 patched bundle，ISOLATED-world 桥把文件操作转发给后台服务 worker。浏览器仍然禁止跨源直接传句柄，但同源扩展内部共享是合规路径。
@@ -72,7 +72,7 @@ AfterChat 油猴脚本加了常驻同步模块：打开**任意 29 个已适配�
 
 ## CI / 自动更新
 
-- `version.json` 记录上游版本和本仓发布版本（如 `1.24.1-ac6`）；`vendor/afterchat.user.js` 是可复现构建的上游快照。
+- `version.json` 记录上游版本和本仓发布版本（如 `1.24.2`）；`vendor/afterchat.user.js` 是可复现构建的上游快照。
 - GitHub Actions：`upstream` 工作流每 3 小时拉取 AfterChat 上游 raw 快照比对；上游版本或内容有变化就更新 `vendor/` 快照、升发布版本、推 commit 并打 `v*` tag，由 `release` 工作流构建、校验并创建 Release。推 tag 或手动触发也能构建发版。
 - Release 里固定资产名 `afterchat-autosync.user.js`，因此 userscript 的 `@updateURL` / `@downloadURL` 可用 latest-release 稳定地址自动升级。
 - 本地校验：`python tools/verify_autosync.py --base .`。

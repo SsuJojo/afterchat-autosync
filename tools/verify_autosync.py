@@ -131,7 +131,7 @@ if os.path.isfile(OUT):
     out = text(OUT) or ""
     check("built: one BEGIN marker", out.count("AC-SYNC BEGIN") == 1, str(out.count("AC-SYNC BEGIN")))
     check("built: one END marker", out.count("AC-SYNC END") == 1, str(out.count("AC-SYNC END")))
-    check("built: version suffix", bool(re.search(r"// @version\s+\S+-ac\d+", out)))
+    check("built: release version", bool(re.search(r"// @version\s+\d+(?:\.\d+){1,3}\s*$", out, re.M)))
     check("built: auto update metadata", "@updateURL" in out and "@downloadURL" in out)
     check("built: contains module", "showDirectoryPicker" in out)
     check("built: stable picker id", "AC_SYNC_PICKER_ID" in out)

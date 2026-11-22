@@ -5,11 +5,11 @@
 1. 在仓库根目录生成页面脚本（尚未包含在仓库里）：
 
    ```bash
-   python -X utf8 tools/patch_afterchat.py --version-tag ac6
+   python -X utf8 tools/patch_afterchat.py --version-tag 1.24.2
    python -X utf8 tools/build_extension.py --sync-version
    ```
 
-   第一条从 `vendor/afterchat.user.js` + `tools/ac-sync.module.js` 生成 `dist/afterchat-autosync.user.js`（`--version-tag` 取 `version.json` 的 `release` 后缀）；第二条把它复制成 `extension/patched.user.js`，并把 `manifest.json` 版本同步到 `version.json`。manifest 已引用它。
+   第一条从 `vendor/afterchat.user.js` + `tools/ac-sync.module.js` 生成 `dist/afterchat-autosync.user.js`（`--version-tag` 取 `version.json` 的 `release`）；第二条把它复制成 `extension/patched.user.js`，并把 `manifest.json` 版本同步到 `version.json` 的纯数字部分。manifest 已引用它。
 
 2. 打开 `edge://extensions`（Edge）或 `chrome://extensions`（Chrome）。
 3. 开启右上角 **开发人员模式**。
