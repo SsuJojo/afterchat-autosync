@@ -1,0 +1,180 @@
+name: auto-pr
+
+on:
+  push:
+    branches:
+      - 'feat/**'
+      - 'fix/**'
+      - 'chore/**'
+      - 'refactor/**'
+      - 'docs/**'
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review, closed]
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: auto-pr-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  GH_TOKEN: ${{ github.token }}
+
+jobs:
+  validate:
+    if: github.event_name == 'push' || github.event.action != 'closed'
+    runs-on: ubuntu-latest
+    outputs:
+      status: ${{ steps.verify.outputs.status }}
+      version: ${{ steps.verify.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Build and verify both deliverables
+        id: verify
+        shell: bash
+        run: |
+          set -o pipefail
+          VERSION=$(python -c "import json; print(json.load(open('version.json', encoding='utf-8'))['release'])")
+          SUFFIX=${VERSION##*-}
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          {
+            python -X utf8 tools/patch_afterchat.py --version-tag "$SUFFIX"
+            python -X utf8 tools/build_extension.py --sync-version
+            python -X utf8 tools/verify_autosync.py --base .
+            node --check tools/ac-sync.module.js
+            node --check dist/afterchat-autosync.user.js
+            for f in extension/background.js extension/console.js extension/content-bridge.js extension/page-bridge.js; do
+              node --check "$f"
+            done
+          } 2>&1 | tee verify.log
+          STATUS=${PIPESTATUS[0]}
+          echo "status=$STATUS" >> "$GITHUB_OUTPUT"
+          exit "$STATUS"
+
+      - name: Open issue on substantive failure
+        if: failure()
+        shell: bash
+        run: |
+          BRANCH="${GITHUB_REF_NAME:-${{ github.event.pull_request.head.ref }}}"
+          TITLE="[auto] Validation failed on $BRANCH @ ${GITHUB_SHA:0:7}"
+          EXISTING=$(gh issue list --state open --search "in:title $TITLE" --json number --jq '.[0].number // empty')
+          if [ -n "$EXISTING" ]; then
+            echo "Issue already open: #$EXISTING"
+            exit 0
+          fi
+          {
+            echo "Automatic build/verification failed for \`$BRANCH\` at \`$GITHUB_SHA\`."
+            echo
+            echo "Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            echo
+            echo '```text'
+            tail -n 120 verify.log 2>/dev/null || true
+            echo '```'
+          } > issue_body.md
+          gh issue create --title "$TITLE" --body-file issue_body.md \
+            --label bug --label automation || true
+
+  pr:
+    if: github.event_name == 'push'
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create or refresh draft PR
+        shell: bash
+        run: |
+          BRANCH="$GITHUB_REF_NAME"
+          [ "$BRANCH" = "main" ] && exit 0
+          NUM=$(gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number // empty')
+          {
+            echo "## 摘要 / Summary"
+            echo
+            echo "自动为独立分支 \`$BRANCH\` 创建的 PR。油猴版与 MV3 插件版由同一份 `tools/ac-sync.module.js` 构建。"
+            echo
+            echo "Auto-created PR for branch \`$BRANCH\`. The userscript and MV3 extension share one sync module."
+            echo
+            echo "## 验证 / Verification"
+            echo
+            echo "- 构建版本: ${{ needs.validate.outputs.version }}"
+            echo "- 静态验收: ${{ needs.validate.outputs.status == '0' && 'PASS' || 'FAIL' }}"
+            echo "- 工作流: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            echo
+            echo "## 风险与回滚 / Risks & rollback"
+            echo
+            echo "- 风险: 浏览器扩展注入与油猴脚本共用页面上下文，需实机加载扩展验证。"
+            echo "- 回滚: revert 本 PR 后重新发布上一版本工件。"
+            echo
+            echo "- Risk: extension injection shares the page world with the userscript; manual load test required."
+            echo "- Rollback: revert this PR and republish the previous artifacts."
+            echo
+            echo "<!-- auto-pr:$GITHUB_SHA -->"
+          } > pr_body.md
+
+          if [ -z "$NUM" ]; then
+            gh pr create --draft --base main --head "$BRANCH" \
+              --title "feat: $BRANCH (auto draft)" --body-file pr_body.md
+          else
+            gh pr edit "$NUM" --body-file pr_body.md
+            IS_DRAFT=$(gh pr view "$NUM" --json isDraft --jq '.isDraft')
+            READY=$(gh pr view "$NUM" --json labels --jq '[.labels[].name] | index("ready-for-review") != null')
+            if [ "$IS_DRAFT" = "false" ] && [ "$READY" = "false" ]; then
+              NODE=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$NUM" --jq .node_id)
+              gh api graphql -f query='mutation($id:ID!){convertPullRequestToDraft(input:{pullRequestId:$id}){pullRequest{id}}}' -F id="$NODE"
+            fi
+          fi
+
+  review:
+    if: github.event_name == 'pull_request' && github.event.action != 'closed'
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Post automatic review comment
+        shell: bash
+        run: |
+          PR="${{ github.event.pull_request.number }}"
+          SHA="${{ github.event.pull_request.head.sha }}"
+          MARK="<!-- auto-review:$SHA -->"
+          if gh pr view "$PR" --json comments --jq '.comments[].body' | grep -Fq "$MARK"; then
+            echo "Already reviewed $SHA"
+            exit 0
+          fi
+          {
+            echo "## 自动审查 / Auto review"
+            echo
+            echo "- 构建版本: ${{ needs.validate.outputs.version }}"
+            echo "- 静态验收: ${{ needs.validate.outputs.status == '0' && 'PASS' || 'FAIL' }}"
+            echo "- 油猴版 + 插件版产物均已构建 / Both userscript and extension bundles were built"
+            echo "- 工作流: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            echo
+            echo "若已可合并，请添加 \`ready-for-review\` 标签；未完成的独立分支 PR 会保持 draft。"
+            echo "Add \`ready-for-review\` when ready; unfinished branch PRs stay as drafts."
+            echo
+            echo "$MARK"
+          } > review.md
+          gh pr review "$PR" --comment --body-file review.md
+
+  cleanup:
+    if: github.event_name == 'pull_request' && github.event.action == 'closed' && github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete merged source branch
+        shell: bash
+        run: |
+          BRANCH="${{ github.event.pull_request.head.ref }}"
+          [ "$BRANCH" = "main" ] && exit 0
+          gh api -X DELETE "repos/$GITHUB_REPOSITORY/git/refs/heads/$BRANCH" || true

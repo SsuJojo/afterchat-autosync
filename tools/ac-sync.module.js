@@ -43,6 +43,88 @@
   const AC_SYNC_DRAIN_BATCH_STABLE = 60;              // 常规小批量排水条数
   const AC_SYNC_EXPORTED_CAP = 2000;                  // 已导出登记上限（防索引无限膨胀）
 
+  // ---- 扩展桥：MV3 扩展一次选目录，29 站点复用同一个句柄 ----
+  // 在扩展里 page-bridge.js 提供 __AC_SYNC_EXT_CALL__；油猴环境下没有，
+  // 下面的适配层完全静默退回原生 File System Access API，两种运行方式共用同一份模块。
+  let acSyncExtensionMode = false;
+  let acSyncExtRoot = null;
+
+  async function acSyncExtCall(op, args = {}) {
+    if (typeof window.__AC_SYNC_EXT_CALL__ !== 'function') throw new Error('扩展桥不可用');
+    return window.__AC_SYNC_EXT_CALL__(op, args);
+  }
+
+  // 等 content script 注入桥（最多 1.5s），油猴环境直接返回 false
+  const acSyncExtReady = new Promise((resolve) => {
+    const started = Date.now();
+    const tick = async () => {
+      if (typeof window.__AC_SYNC_EXT_CALL__ === 'function') {
+        acSyncExtensionMode = true;
+        acSyncRefreshExtRoot().catch(() => { /* 后台未就绪时由 acSyncGetHandle 再试 */ });
+        resolve(true);
+        return;
+      }
+      if (Date.now() - started > 1500) { resolve(false); return; }
+      setTimeout(tick, 50);
+    };
+    tick();
+  });
+
+  class AcSyncExtWritable {
+    constructor(token) { this.__token = token; }
+    async write(content) { return acSyncExtCall('write', { token: this.__token, content }); }
+    async close() { return acSyncExtCall('close', { token: this.__token }); }
+  }
+
+  class AcSyncExtFileHandle {
+    constructor(name, path) { this.name = name; this.kind = 'file'; this.__path = path; }
+    async getFile() {
+      const path = this.__path, name = this.name;
+      return { name, async text() { return acSyncExtCall('getFileText', { path, name }); } };
+    }
+    async createWritable() {
+      const token = await acSyncExtCall('createWritable', { path: this.__path, name: this.name });
+      return new AcSyncExtWritable(token);
+    }
+  }
+
+  class AcSyncExtDirectoryHandle {
+    constructor(name, path) { this.name = name; this.kind = 'directory'; this.__path = path; }
+    async getDirectoryHandle(name, options = {}) {
+      await acSyncExtCall('getDirectoryHandle', { path: this.__path, name, create: !!options.create });
+      return new AcSyncExtDirectoryHandle(name, [...this.__path, name]);
+    }
+    async getFileHandle(name, options = {}) {
+      await acSyncExtCall('getFileHandle', { path: this.__path, name, create: !!options.create });
+      return new AcSyncExtFileHandle(name, [...this.__path, name]);
+    }
+    async removeEntry(name) { return acSyncExtCall('removeEntry', { path: this.__path, name }); }
+    async *entries() {
+      const items = await acSyncExtCall('entries', { path: this.__path });
+      for (const it of items) {
+        const Ctor = it.kind === 'directory' ? AcSyncExtDirectoryHandle : AcSyncExtFileHandle;
+        yield [it.name, new Ctor(it.name, [...this.__path, it.name])];
+      }
+    }
+    async queryPermission() { return 'granted'; }
+    async requestPermission() { return 'granted'; }
+  }
+
+  async function acSyncRefreshExtRoot() {
+    const root = await acSyncExtCall('getRoot');
+    acSyncExtRoot = root && root.name ? new AcSyncExtDirectoryHandle(root.name, []) : null;
+    return acSyncExtRoot;
+  }
+
+  // 扩展控制台选/换目录后广播，页面清缓存并重跑一轮
+  window.addEventListener('message', (ev) => {
+    if (ev.source !== window || !ev.data || ev.data.__acSyncExtRootChanged !== true) return;
+    acSyncExtRoot = null;
+    const st = acSyncReadState();
+    if (st.enabled) Promise.resolve(acSyncRun('manual')).catch(() => {});
+    acSyncRefreshPanel();
+  });
+
   // ---- 状态层：localStorage ac-sync-state = { dirName, enabled, platforms: {...} } ----
   function acSyncReadState() {
     const def = { dirName: '', enabled: false, platforms: {} };
@@ -109,6 +191,7 @@
   }
 
   async function acSyncStoreHandle(handle) {
+    if (acSyncExtensionMode) return;   // 扩展模式：句柄存在扩展自己的 IndexedDB，不再写站点 DB
     const db = await acSyncOpenDb();
     await new Promise((resolve, reject) => {
       const tx = db.transaction(AC_SYNC_DB_STORE, 'readwrite');
@@ -121,6 +204,11 @@
   }
 
   async function acSyncGetHandle() {
+    await acSyncExtReady;
+    if (acSyncExtensionMode) {
+      if (!acSyncExtRoot) await acSyncRefreshExtRoot();
+      return acSyncExtRoot;
+    }
     const db = await acSyncOpenDb();
     const handle = await new Promise((resolve, reject) => {
       const tx = db.transaction(AC_SYNC_DB_STORE, 'readonly');
@@ -533,10 +621,16 @@
 
   // =============================================================
   //  启用 / 关闭 / 选择 / 更换目录（showDirectoryPicker 只在用户点击回调里调用）
-  //  目录句柄按站点隔离（IndexedDB acSyncDb）：同站点启用可复用免重选；
-  //  跨站点浏览器不允许传递句柄，各站点需各选一次（选择器 id 记住上次位置）
+  //  油猴模式：句柄按站点隔离（IndexedDB acSyncDb），同站点启用可复用；跨站各选一次
+  //  扩展模式：目录由扩展 UI 选一次存扩展 IDB，站点通过桥复用（浏览器跨源规则限制见 README）
   //  =============================================================
   async function acSyncPickDirectory() {
+    await acSyncExtReady;
+    if (acSyncExtensionMode) {
+      // showDirectoryPicker 必须在扩展页面里由手势触发；站点里只能打开控制台
+      await acSyncExtCall('openConsole').catch(() => {});
+      throw new Error('请在打开的扩展控制台里选择/更换目录');
+    }
     if (typeof window.showDirectoryPicker !== 'function') {
       throw new Error('当前浏览器不支持文件系统目录访问（需 Chrome/Edge 122+）');
     }
@@ -548,7 +642,9 @@
   }
 
   async function acSyncEnableSync(handle) {
-    const root = handle || await acSyncPickDirectory();
+    await acSyncExtReady;
+    const root = handle || (acSyncExtensionMode ? await acSyncGetHandle() : await acSyncPickDirectory());
+    if (!root) throw new Error('未选择同步目录');
 
     // 为每个启用平台建 <id>\ 与 <id>\_failed\ 子目录
     for (const id of AC_SYNC_PLATFORMS) {
@@ -594,6 +690,12 @@
 
   // “更换目录”：总是弹出选择器重选；锚点保留，同名覆盖幂等
   async function acSyncChangeDirectory() {
+    await acSyncExtReady;
+    if (acSyncExtensionMode) {
+      await acSyncExtCall('openConsole').catch(() => {});
+      acSyncRefreshPanel();
+      return null;
+    }
     const handle = await acSyncPickDirectory();
     return acSyncEnableSync(handle);
   }
@@ -642,7 +744,9 @@
     acSyncStatusEl.textContent = '';
     const line1 = document.createElement('div');
     if (!st.enabled) {
-      line1.textContent = st.dirName ? '自动同步: 关（开启时直接复用目录）' : '自动同步: 关';
+      line1.textContent = acSyncExtensionMode
+        ? (st.dirName ? '自动同步: 关（扩展目录已就绪）' : '自动同步: 关（请在扩展控制台选择目录）')
+        : (st.dirName ? '自动同步: 关（开启时直接复用目录）' : '自动同步: 关');
       line1.style.color = '#888888';
     } else if (!st.dirName) {
       line1.textContent = '自动同步: 未选目录';
@@ -831,6 +935,7 @@
       const st = acSyncReadState();
       return {
         ...st,
+        extensionMode: acSyncExtensionMode,
         needsAuth: acSyncNeedsAuth,
         running: acSyncRunning,
         enabledPlatforms: [...AC_SYNC_PLATFORMS],
