@@ -16,7 +16,7 @@
 // @name:tr      AfterChat — LLM Sohbet Dışa Aktarıcı
 // @name:ar      AfterChat — مصدِّر محادثات LLM
 // @namespace    https://github.com/AfterThink
-// @version      1.24.1
+// @version      1.25.0
 // @description  Export chat history from ChatGPT, Claude, Gemini, Google AI Mode, Grok, DeepSeek, Microsoft Copilot, M365 Copilot, Perplexity, Kimi, Doubao, ChatGLM, Z.ai, Qwen, Qianwen, Poe, Tencent Yuanbao, Tencent Hunyuan, MiniMax, Mistral, Monica, Google AI Studio, DuckDuckGo AI Chat, Tencent IMA, Sakana AI, Arena AI, Dola, StepFun
 // @description:zh-CN  一键导出 ChatGPT、Claude、Gemini、Google AI Mode、Grok、DeepSeek、Microsoft Copilot、M365 Copilot、Perplexity、Kimi、豆包、智谱清言、Z.ai、通义千问、千问、Poe、腾讯元宝、腾讯混元、MiniMax、Mistral、Monica、Google AI Studio、DuckDuckGo AI Chat、腾讯 ima、Sakana AI、Arena AI、Dola、阶跃星辰 StepFun 的聊天记录
 // @description:zh-TW  一鍵匯出 ChatGPT、Claude、Gemini、Google AI Mode、Grok、DeepSeek、Microsoft Copilot、M365 Copilot、Perplexity、Kimi、豆包、智譜清言、Z.ai、通義千問、千問、Poe、騰訊元寶、騰訊混元、MiniMax、Mistral、Monica、Google AI Studio、DuckDuckGo AI Chat、騰訊 ima、Sakana AI、Arena AI、Dola、階躍星辰 StepFun 的聊天記錄
@@ -95,6 +95,27 @@
 // =============================================================
 //  📜 Changelog 
 // =============================================================
+//  1.25.0 (2026-11-19)
+//    - 【接口变更】M365 Copilot 详情：旧接口 GET /chat/conversation/{id}?auth=2 不再返回
+//      store.rawConversationResponse（服务端已下线），导致单条导出报“未找到 rawConversationResponse”。
+//      详情改走 NDJSON 流 GET /chat/conversation/{id}?direction=Bidirectional&startTimeUtc=now，
+//      必须带 x-streaming: true / x-streaming-shell / x-streaming-direction；
+//      新增 _parseStream 合并流内多段 messages，按 messageId 去重 + createdAt 升序排序，
+//      isLastPage=false 时以最早消息时间锚点继续取；正文仍优先 adaptiveCards，
+//      引用标题改取 displayData.content（title/name/providerDisplayName）。
+//      导出章节结构不变（Thought Process / References 规则照旧）。
+//    - copilot.com 的 _mergeStream 不再依赖 pageDirection：去重后补一次 createdAt 升序排序，
+//      避免流内分页乱序（同源 M365 实测形状）导致对话错位。
+//  1.24.3 (2026-11-18)
+//    - 移动端避让：针对窄屏（max-width: 768px）将导出按钮位置从贴底抬高至
+//      calc(88px + env(safe-area-inset-bottom, 0px))，避开输入栏与原生发送按键。
+//    - 修复增量时间编辑体验：移除 datetime-local 的 change 即时销毁 Bug，
+//      消除逐段失焦反复双击问题；支持 Enter 确认、Esc 取消、外部点击提交；
+//      采用一体化胶囊包装确认对勾，消除外挂方块边框，保证 Firefox/Chrome/Safari 跨浏览器原生体验。
+//  1.24.2 (2026-11-17)
+//    - 修复 Google AI Mode（gaim）手机端 UA 导出缺失 Assistant 回复：
+//      手机端 DOM 正文未包裹在 div.pWvJNd 中，_extractAnswerMd 增加回退容器兼容；
+//      _bodyBlocks 排除用户提问容器干扰，_countTurns 增强手机端语义块识别。
 //  1.24.1 (2026-11-08)
 //    - 修复 Google AI Mode（gaim）代码块丢失及纯代码回复 Assistant 消息丢失：
 //      _bodyBlocks 增加 .aiModeUiCodeBlock__Container / pre 提取，_countTurns 补充代码块感知；
@@ -484,37 +505,137 @@
           .filter((c) => c.id);
       },
 
+      /**
+       * 详情：NDJSON 流式接口（旧版 store.rawConversationResponse 已下线）。
+       * 一次 Bidirectional + startTimeUtc=now 就能拿到整条对话（含更早的历史分页）；
+       * isLastPage=false 时以最早消息的时间戳为锚点继续往更早取。
+       */
       async getConversationDetails(id) {
-        const url = `/chat/conversation/${id}?auth=2`;
+        const limit = 20;
+        let anchor = Date.now();
+        let meta = null;
+        let isLastPage = true;
+        const byId = new Map();
+
+        for (let round = 0; round < limit; round++) {
+          const page = await this._streamPage(id, anchor);
+          if (!meta) meta = page.meta;
+
+          let added = 0;
+          for (const msg of page.messages) {
+            const key = msg && msg.messageId;
+            if (!key || byId.has(key)) continue;
+            byId.set(key, msg);
+            added++;
+          }
+
+          isLastPage = page.isLastPage;
+          if (!added || isLastPage) break;
+
+          const earliest = Math.min(...[...byId.values()].map((m) => this._messageTime(m)).filter(Number.isFinite));
+          if (!Number.isFinite(earliest) || earliest + 1 === anchor) break;
+          anchor = earliest + 1;
+          await sleep(CONFIG.API_PAGE_DELAY);
+        }
+
+        const messages = [...byId.values()].sort((a, b) => this._messageTime(a) - this._messageTime(b));
+        if (!messages.length) throw new Error('无消息数据');
+
+        const chatName = (meta?.chatName || '').trim();
+        return {
+          // 供核心 getChatTitle 读取（单条导出的文件名兜底）
+          title: chatName,
+          chatName,
+          tone: meta?.tone || '',
+          createTimeUtc: meta?.createTimeUtc,
+          updateTimeUtc: meta?.updateTimeUtc,
+          conversationId: meta?.conversationId || id,
+          messages,
+        };
+      },
+
+      /** 取一页 NDJSON 流并解析（direction=Bidirectional + startTimeUtc=锚点） */
+      async _streamPage(id, startTimeUtc) {
+        const url = `/chat/conversation/${encodeURIComponent(id)}?direction=Bidirectional&startTimeUtc=${startTimeUtc}`;
         const resp = await fetch(url, {
           headers: {
-            'accept': 'application/json',
+            'accept': 'application/x-ndjson,application/json',
+            // 关键：缺了 x-streaming，服务端只回 SSR bootstrap JSON（没有 messages）
+            'x-streaming': 'true',
+            'x-streaming-shell': 'true',
+            'x-streaming-direction': 'Bidirectional',
+            'x-streaming-start-time-utc': String(startTimeUtc),
             'x-route-id': 'chat-history',
             'x-slim-rehydration': 'true',
-            'x-host-context': JSON.stringify({
-              clientPlatform: 'web',
-              hostName: 'officeweb',
-              appName: 'SSR',
-              appMode: 'default',
-            }),
+            'x-host-context': this._hostContext(),
+            'x-session-id': this._uuid(),
+            'x-rehydration-id': this._uuid(),
           },
         });
-        if (!resp.ok) throw new Error(`API ${resp.status}: ${resp.statusText}`);
-        return resp.json();
+        if (!resp.ok) throw new Error(`详情API ${resp.status}: ${resp.statusText}`);
+        return this._parseStream(await resp.text());
+      },
+
+      /**
+       * 解析 NDJSON 流：跳过 __shell / __metrics 行，合并所有 {messages:[...]} 行。
+       * 注意流内分页顺序不保证（新页可能排在旧页前面），所以最终按时间排序。
+       */
+      _parseStream(text) {
+        const messages = [];
+        let meta = null;
+        let isLastPage = true;
+
+        for (const line of String(text || '').split('\n')) {
+          const raw = line.trim();
+          if (!raw) continue;
+          let obj;
+          try { obj = JSON.parse(raw); } catch (e) { continue; }
+
+          if (obj.__shell || obj.__metrics) continue;
+          if (typeof obj.isLastPage === 'boolean') isLastPage = obj.isLastPage;
+          if (!Array.isArray(obj.messages)) continue;
+          if (!meta) meta = obj;
+          messages.push(...obj.messages);
+        }
+
+        return { messages, meta, isLastPage };
+      },
+
+      _messageTime(msg) {
+        const t = Date.parse(msg?.createdAt || msg?.timestamp || '');
+        return Number.isFinite(t) ? t : 0;
+      },
+
+      _hostContext() {
+        return JSON.stringify({
+          clientPlatform: 'web', hostName: 'officeweb', appName: 'SSR', appMode: 'default',
+        });
+      },
+
+      _uuid() {
+        try {
+          if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+            return crypto.randomUUID();
+          }
+        } catch (e) { /* ignore */ }
+        return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+          const r = (Math.random() * 16) | 0;
+          return (c === 'x' ? r : ((r & 0x3) | 0x8)).toString(16);
+        });
       },
 
       /** 将 M365 聊天数据转为 Markdown */
       toMarkdown(data, title, convId) {
-        const rcr = data?.store?.rawConversationResponse;
-        if (!rcr) throw new Error('未找到 rawConversationResponse');
+        const messages = data?.messages || [];
+        if (!messages.length) throw new Error('无消息数据');
 
-        const tone = rcr.tone || 'unknown';
-        const createTimeMs = rcr.createTimeUtc;
+        const tone = data?.tone || 'unknown';
+        const createTimeMs = data?.createTimeUtc;
         const timeStr = createTimeMs
           ? formatLocalTime(new Date(createTimeMs))
           : 'unknown';
         const convUrl = convId
-          ? `https://copilot.cloud.microsoft/chat/conversation/${convId}?auth=2`
+          ? `https://copilot.cloud.microsoft/chat/conversation/${convId}`
           : 'https://copilot.cloud.microsoft';
 
         const lines = [];
@@ -528,9 +649,6 @@
         lines.push('');
         lines.push('## Conversation');
         lines.push('');
-
-        const messages = rcr.messages || [];
-
 
         // ---- 第一遍：收集引用，按 URL 去重全局编号 ----
         const refCollector = new ReferenceCollector();
@@ -552,12 +670,10 @@
 
           for (const key of uniqueKeys) {
             if (!refKeyToNum.has(key)) {
-              const refInfo = refs[key];
-              if (refInfo && refInfo.targetLink) {
-                const link = refInfo.targetLink;
-                const title = refInfo.title || '';
-                const gn = refCollector.add(title, link);
-                refKeyToNum.set(key, gn);
+              const info = this._resolveReference(refs[key]);
+              // 无外链的引用（如 maikit-sdl 图片卡）不登记，正文里连同标记一起去掉
+              if (info) {
+                refKeyToNum.set(key, refCollector.add(info.title, info.url));
               } else {
                 refKeyToNum.set(key, null);
               }
@@ -576,7 +692,7 @@
           const author = msg.author;
 
           if (author === 'user') {
-            const text = (msg.text || '').trim();
+            const text = this._getMessageText(msg).trim();
             if (!text) continue;
             lines.push('### 🧑‍💻 User');
             lines.push('');
@@ -592,15 +708,14 @@
             const turn = msg.turnCount;
             const thoughts = [];
             for (let j = i - 1; j >= 0 && messages[j].turnCount === turn; j--) {
-              if (this._isThinkingMsg(messages[j])) {
-                const t = (messages[j].text || '').trim();
-                if (t) thoughts.unshift(t);
-              }
+              const t = this._thinkingText(messages[j]).trim();
+              if (t) thoughts.unshift(t);
             }
 
-            // 替换引用
+            // 替换引用（先把单独成行的标记并回上一行）
             const citeMap = msgCitationMap.get(i) || new Map();
-            let cleaned = responseText.replace(/【([^】]+)】/g, (_, key) => {
+            const normalized = this._normalizeCitationPlacement(responseText);
+            const cleaned = normalized.replace(/【([^】]+)】/g, (_, key) => {
               const n = citeMap.get(key);
               return n !== undefined && n !== null ? `[${n}]` : '';
             });
@@ -634,23 +749,108 @@
 
       // ---- 内部辅助方法 ----
       _isThinkingMsg(msg) {
+        if (!msg) return false;
         return msg.messageType === 'Progress'
           || msg.addToChainOfThought === true
           || msg.contentType === 'SearchResults';
       },
 
       _isFinalResponse(msg) {
-        if (msg.author !== 'bot') return false;
+        if (!msg || msg.author !== 'bot') return false;
         if (this._isThinkingMsg(msg)) return false;
         return this._getResponseText(msg) !== null;
       },
 
+      /**
+       * Progress 消息的正文统一作为思考链候选（m365 一直这么做）：
+       * 是否进 Thought Process 由 _isThinkingMsg 决定，这里不做 contentType 过滤。
+       */
+      _thinkingText(msg) {
+        if (!this._isThinkingMsg(msg)) return '';
+        return this._getMessageText(msg).trim();
+      },
+
+      _getMessageText(msg) {
+        if (!msg) return '';
+        return typeof msg.text === 'string' ? msg.text : '';
+      },
+
+      /** 正文优先取 adaptiveCards（含【引用】标记），没有再回落 .text */
       _getResponseText(msg) {
+        if (!msg) return null;
         try {
-          return msg.adaptiveCards[0].body[0].text;
-        } catch (e) {
-          return null;
+          const ac = msg.adaptiveCards[0].body[0].text;
+          if (typeof ac === 'string' && ac.trim()) return ac;
+        } catch (e) { /* 无 adaptiveCards，回落 .text */ }
+        const text = this._getMessageText(msg);
+        return text.trim() ? text : null;
+      },
+
+      /**
+       * 引用标记【key】有时会独占一行（表格里甚至落到下一行行首），
+       * 直接替换会留下空行或把表格打断。这里把它并回上一非空行末尾。
+       */
+      _normalizeCitationPlacement(text) {
+        const out = [];
+
+        for (const line of String(text || '').split('\n')) {
+          const m = line.match(/^[ \t]*(【[^】]+】)(.*)$/);
+          if (!m) {
+            out.push(line);
+            continue;
+          }
+
+          const marker = m[1];
+          const rest = m[2];
+          let target = out.length - 1;
+          while (target >= 0 && !out[target].trim()) target--;
+          if (target < 0) {
+            out.push(line);
+            continue;
+          }
+
+          const prev = out[target];
+          if (/^\s*\|.*\|\s*$/.test(prev)) {
+            out[target] = prev.replace(/\|\s*$/, marker + '|');
+          } else {
+            out[target] = prev.replace(/\s*$/, '') + marker;
+          }
+
+          if (rest.trim()) out.push(rest);
         }
+
+        return out.join('\n');
+      },
+
+      /** 解析单条引用：外链在 targetLink，标题在 displayData.content(JSON) */
+      _resolveReference(ref) {
+        if (!ref || typeof ref !== 'object') return null;
+        const url = typeof ref.targetLink === 'string' ? ref.targetLink.trim() : '';
+        if (!url) return null;
+        return { url, title: this._referenceTitle(ref) };
+      },
+
+      /** 引用标题：displayData.title / content JSON 里的可读名 → 域名兜底 */
+      _referenceTitle(ref) {
+        const dd = ref && ref.displayData;
+        if (dd && typeof dd === 'object') {
+          for (const key of ['title', 'name']) {
+            if (typeof dd[key] === 'string' && dd[key].trim()) return dd[key].trim();
+          }
+          if (typeof dd.content === 'string') {
+            try {
+              const c = JSON.parse(dd.content);
+              // 注意：label 是角标数字（"1"），不能当标题
+              for (const key of ['title', 'name', 'providerDisplayName']) {
+                if (typeof c?.[key] === 'string' && c[key].trim()) return c[key].trim();
+              }
+            } catch (e) { /* 非 JSON，忽略 */ }
+          }
+          if (typeof dd.providerDisplayName === 'string' && dd.providerDisplayName.trim()) {
+            return dd.providerDisplayName.trim();
+          }
+        }
+        return typeof ref.title === 'string' ? ref.title.trim() : '';
       },
 
       // M365 专用：列表分页请求（XHR，因为 fetch 在这个接口上有坑）
@@ -858,6 +1058,14 @@
             : [...pageMsgs, ...kept];
         }
 
+        // 防御性排序：pageDirection 只是服务端提示，并不保证流内分页顺序。
+        // 同源 M365 接口实测会下发「最新段在前、更早段在后且缺失 pageDirection」，
+        // 光靠前后拼接会得到错乱的对话。这里按 createdAt 升序（缺时间戳的保持原序）。
+        messages = messages
+          .map((m, i) => ({ m, i, t: this._messageTime(m) }))
+          .sort((a, b) => (a.t - b.t) || (a.i - b.i))
+          .map((x) => x.m);
+
         return { messages, meta };
       },
 
@@ -1003,6 +1211,12 @@
       _getMessageText(msg) {
         if (!msg) return '';
         return typeof msg.text === 'string' ? msg.text : '';
+      },
+
+      /** 消息时间戳（毫秒）：createdAt 优先，退回 timestamp；无效时返回 0 */
+      _messageTime(msg) {
+        const t = Date.parse(msg?.createdAt || msg?.timestamp || '');
+        return Number.isFinite(t) ? t : 0;
       },
 
       /** 优先用 adaptiveCards 正文（老结构兼容），否则回退 .text */
@@ -2002,7 +2216,7 @@
           ) {
             return null;
           }
-        } catch (_) {}
+        } catch (_) { }
 
         const t = (document.title || '').trim();
         // 2. 首页/未打开任何会话时的固定标题（各语言版本均为 Duck.ai 开头并包含 DuckDuckGo，
@@ -2299,7 +2513,7 @@
             this._projectCache = this._projectCache || {};
             this._projectCache[projectId] = name;
           }
-        }).catch(() => {}).finally(() => {
+        }).catch(() => { }).finally(() => {
           this._projectFetching.delete(projectId);
         });
       },
@@ -2414,7 +2628,7 @@
         try {
           const activeAccount = typeof sessionStorage !== 'undefined' ? sessionStorage.getItem('pplx-active-account') : null;
           if (activeAccount) headers['x-pplx-account'] = activeAccount;
-        } catch (_) {}
+        } catch (_) { }
         return headers;
       },
 
@@ -2450,7 +2664,7 @@
         try {
           const activeAccount = typeof sessionStorage !== 'undefined' ? sessionStorage.getItem('pplx-active-account') : null;
           if (activeAccount) headers['x-pplx-account'] = activeAccount;
-        } catch (_) {}
+        } catch (_) { }
         const r = await fetch('/rest/perplexity_ask/graphql', {
           method: 'POST',
           headers,
@@ -2984,7 +3198,7 @@
             this._projectCache = this._projectCache || {};
             this._projectCache[projectId] = name;
           }
-        }).catch(() => {}).finally(() => {
+        }).catch(() => { }).finally(() => {
           this._projectFetching.delete(projectId);
         });
       },
@@ -3321,7 +3535,7 @@
               this._projectCache[gid] = gname;
             }
           }
-        }).catch(() => {}).finally(() => {
+        }).catch(() => { }).finally(() => {
           this._projectFetching.delete(groupId);
         });
       },
@@ -3380,7 +3594,7 @@
             const match = name.match(/\/qianwen-web\/(\d+\.\d+\.\d+)\//);
             if (match) return match[1];
           }
-        } catch (e) {}
+        } catch (e) { }
         return '4.0.7';
       },
 
@@ -3392,7 +3606,7 @@
         const version = this._webVersion();
         const nav = typeof navigator !== 'undefined' ? navigator : { language: 'zh-CN' };
         let tz = 'Asia/Shanghai';
-        try { tz = Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Shanghai'; } catch (e) {}
+        try { tz = Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Shanghai'; } catch (e) { }
         return new URLSearchParams({
           biz_id: 'ai_qwen',
           chat_client: 'h5',
@@ -3913,7 +4127,7 @@
             this._projectCache = this._projectCache || {};
             this._projectCache[projectId] = name;
           }
-        }).catch(() => {}).finally(() => {
+        }).catch(() => { }).finally(() => {
           this._projectFetching.delete(projectId);
         });
       },
@@ -4588,7 +4802,7 @@
             this._projectCache = this._projectCache || {};
             this._projectCache[projectId] = name;
           }
-        }).catch(() => {}).finally(() => {
+        }).catch(() => { }).finally(() => {
           this._projectFetching.delete(projectId);
         });
       },
@@ -4954,7 +5168,7 @@
               window.__m365Controller.updateLabel();
             }
           })
-          .catch(() => {})
+          .catch(() => { })
           .finally(() => {
             this._fetchingProjectId = null;
           });
@@ -5412,7 +5626,7 @@
             this._projectCache = this._projectCache || {};
             this._projectCache[projectId] = p.name;
           }
-        }).catch(() => {}).finally(() => {
+        }).catch(() => { }).finally(() => {
           this._projectFetching.delete(projectId);
         });
       },
@@ -5862,7 +6076,7 @@
 
         for (let i = 0; i < messages.length; i++) {
           const msg = messages[i];
-          const prev = i > 0 ? messages[i-1] : null;
+          const prev = i > 0 ? messages[i - 1] : null;
           const isContinuedModel = (msg.role === 'model' || msg.role === 'assistant') && prev && (prev.role === 'model' || prev.role === 'assistant');
 
           const tp = convertParts(msg.parts.filter(p => p.type === 'thought'));
@@ -5967,7 +6181,7 @@
                 this._apiKey = data.WIu0Nc;
                 return this._apiKey;
               }
-            } catch {}
+            } catch { }
           }
         }
         throw new Error('API key 未找到：页面 JSON config 结构可能已变更');
@@ -6151,7 +6365,7 @@
             this._projectCache = this._projectCache || {};
             this._projectCache[projectId] = name;
           }
-        })().catch(() => {}).finally(() => {
+        })().catch(() => { }).finally(() => {
           this._projectFetching.delete(projectId);
         });
       },
@@ -6596,7 +6810,7 @@
     //  ADAPTER[grokcom]  Grok Web (grok.com)
     // ═══════════════════════════════════════════════════════
     // API 说明：
-    //   - 列表：GET /rest/app-chat/conversations，pageSize=60 + pageToken
+    //   - 列表：GET /rest/app-chat/conversations?pageSize=60
     //   - 节点：GET /rest/app-chat/conversations/{id}/response-node
     //   - 详情：POST /rest/app-chat/conversations/{id}/load-responses
     // 认证：同域 Cookie（credentials: 'include' 自动发送），无需额外 header。
@@ -6614,7 +6828,7 @@
           const params = new URLSearchParams(window.location.search);
           const chat = params.get('chat');
           if (chat && /^[a-zA-Z0-9-]+$/.test(chat)) return chat;
-        } catch (_) {}
+        } catch (_) { }
         return null;
       },
 
@@ -6634,7 +6848,7 @@
               this._projectCache = this._projectCache || {};
               this._projectCache[projectId] = name;
             }
-          }).catch(() => {}).finally(() => {
+          }).catch(() => { }).finally(() => {
             this._projectFetching.delete(projectId);
           });
       },
@@ -6720,32 +6934,19 @@
       async getAllConversations(onProgress) {
         const allChats = [];
         const limit = CONFIG.DEBUG_LIMIT || Infinity;
-        const seen = new Set();
-        let pageToken = '';
-        while (allChats.length < limit) {
-          const params = new URLSearchParams({ pageSize: '60' });
-          if (pageToken) params.set('pageToken', pageToken);
-          const resp = await fetch(`/rest/app-chat/conversations?${params.toString()}`, { credentials: 'include' });
-          if (!resp.ok) throw new Error(`Grok 列表请求失败: HTTP ${resp.status}`);
-          const data = await resp.json();
-          const list = data?.conversations || [];
-          if (!list.length) break;
-          for (const c of list) {
-            const id = c.conversationId;
-            if (!id || seen.has(id)) continue;
-            seen.add(id);
-            allChats.push({
-              id,
-              title: c.title || 'untitled',
-              createTimeUtc: c.createTime ? new Date(c.createTime).getTime() : Date.now(),
-              updateTimeUtc: c.modifyTime ? new Date(c.modifyTime).getTime() : Date.now(),
-            });
-          }
-          if (onProgress) onProgress(allChats.length);
-          pageToken = data?.nextPageToken || '';
-          if (!pageToken) break;
-          await sleep(CONFIG.API_PAGE_DELAY);
+        const resp = await fetch('/rest/app-chat/conversations?pageSize=60', { credentials: 'include' });
+        if (!resp.ok) throw new Error(`Grok 列表请求失败: HTTP ${resp.status}`);
+        const data = await resp.json();
+        const list = data?.conversations || [];
+        for (const c of list) {
+          allChats.push({
+            id: c.conversationId,
+            title: c.title || 'untitled',
+            createTimeUtc: c.createTime ? new Date(c.createTime).getTime() : Date.now(),
+            updateTimeUtc: c.modifyTime ? new Date(c.modifyTime).getTime() : Date.now(),
+          });
         }
+        if (onProgress) onProgress(allChats.length);
         return allChats.slice(0, limit);
       },
 
@@ -6756,9 +6957,7 @@
         const nodeData = await nodeResp.json();
         const nodes = nodeData?.responseNodes || [];
         const responseIds = nodes.map((n) => n.responseId).filter(Boolean);
-        if (!responseIds.length) {
-          return { conversation_id: id, title: '', createTime: null, responses: [], empty: true };
-        }
+        if (!responseIds.length) throw new Error('对话未包含消息节点');
 
         // 2. load-responses 批量获取详情
         const loadResp = await fetch(`/rest/app-chat/conversations/${id}/load-responses`, {
@@ -6926,10 +7125,10 @@
           uuid = (crypto.randomUUID
             ? crypto.randomUUID()
             : 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
-                const r = Math.random() * 16 | 0;
-                const v = c === 'x' ? r : (r & 0x3 | 0x8);
-                return v.toString(16);
-              })).toUpperCase();
+              const r = Math.random() * 16 | 0;
+              const v = c === 'x' ? r : (r & 0x3 | 0x8);
+              return v.toString(16);
+            })).toUpperCase();
         } catch (e) { /* ignore */ }
 
         const headers = {
@@ -6989,7 +7188,7 @@
               }
             }
           })
-          .catch(() => {})
+          .catch(() => { })
           .finally(() => {
             this._fetchingNotebookId = null;
           });
@@ -7473,7 +7672,7 @@
           let n = 0;
           for (const el of doc.querySelectorAll('div.CKgc1d')) {
             if (!(el.parentElement && el.parentElement.closest('div.CKgc1d'))) {
-              if (el.querySelector('h2.iMqumd') || el.querySelector('div.pWvJNd') || el.querySelector('div.n6owBd') || el.querySelector('.aiModeUiCodeBlock__Container, pre')) n++;
+              if (el.querySelector('h2.iMqumd, div.pWvJNd, div.n6owBd, ul.XSq4R, table.NRefec, .aiModeUiCodeBlock__Container, div.BpxUDf, pre')) n++;
             }
           }
           return n;
@@ -7940,13 +8139,15 @@
         return out;
       },
 
-      /** 回合内全部 pWvJNd 正文 → markdown 字符串（引用跨块连续编号，末尾汇总 References） */
+      /** 回合内全部正文（桌面端 div.pWvJNd 或手机端/无 pWvJNd 时回退 turnEl 容器） → markdown 字符串 */
       _extractAnswerMd(turnEl, sourceInfo) {
         const info = sourceInfo || this._buildSourceInfo((turnEl && turnEl.ownerDocument) || turnEl);
         const refs = [];
         const blocks = [];
-        for (const pWvJNd of turnEl.querySelectorAll('div.pWvJNd')) {
-          blocks.push(...this._bodyBlocks(pWvJNd, refs, info));
+        const pWvRoots = turnEl.querySelectorAll('div.pWvJNd');
+        const containers = pWvRoots.length ? pWvRoots : [turnEl];
+        for (const c of containers) {
+          blocks.push(...this._bodyBlocks(c, refs, info));
         }
         if (!blocks.length) return '';
         const chunks = [];
@@ -7964,12 +8165,13 @@
         return md.trim();
       },
 
-      /** 收集 pWvJNd 内的顶层内容块（段落/小节标题/列表/表格/代码块），引用写进 refs */
+      /** 收集 pWvJNd（或桌面/移动端 turnEl 容器）内的顶层内容块（段落/小节标题/列表/表格/代码块），引用写进 refs */
       _bodyBlocks(pWvJNd, refs, sourceInfo) {
         const blocks = [];
-        const ALLOW = 'div.n6owBd.awi2gc, div[role="heading"][aria-level], ul.XSq4R, table.NRefec, div.aiModeUiCodeBlock__Container, div.BpxUDf, pre';
+        const ALLOW = 'div.n6owBd, div[role="heading"][aria-level], ul.XSq4R, table.NRefec, div.aiModeUiCodeBlock__Container, div.BpxUDf, pre';
         for (const el of pWvJNd.querySelectorAll(ALLOW)) {
           if (el.closest('.DBd2Wb, .RkJvxe, .QRnEfb')) continue;   // 复制/分享/反馈等 UI
+          if (el.closest('.sUKAcb, h2.iMqumd')) continue; // 排除回合内可能存在的用户提问容器
           if (blocks.some((b) => b.dom && b.dom.contains(el))) continue; // 嵌套块
           if (el.tagName === 'UL' && el.closest('li')) continue; // 由外层列表递归
           if (el.tagName === 'TABLE' && el.closest('li, div.n6owBd')) continue; // 表格在段落内罕见，跳过避免与段落串扰
@@ -8208,7 +8410,8 @@
         for (const li of ul.children) {
           if (li.tagName !== 'LI') continue;
           const sub = [...li.children].filter((c) => c.tagName === 'UL' || c.tagName === 'OL');
-          const wrap = document.createElement('span');
+          const doc = ul.ownerDocument || (typeof document !== 'undefined' ? document : null);
+          const wrap = doc ? doc.createElement('span') : document.createElement('span');
           for (const c of li.childNodes) {
             if (c.nodeType === 1 && (c.tagName === 'UL' || c.tagName === 'OL')) continue;
             wrap.appendChild(c.cloneNode(true));
@@ -8876,7 +9079,7 @@
               this._projectCache = this._projectCache || {};
               this._projectCache[projectId] = name;
             }
-          }).catch(() => {}).finally(() => {
+          }).catch(() => { }).finally(() => {
             this._projectFetching.delete(projectId);
           });
       },
@@ -8928,7 +9131,7 @@
           const lines = text.trim().split('\n').filter(Boolean);
           data = [];
           for (const line of lines) {
-            try { data.push(JSON.parse(line)); } catch (_) {}
+            try { data.push(JSON.parse(line)); } catch (_) { }
           }
         }
         return data;
@@ -9351,7 +9554,7 @@
             this._projectCache = this._projectCache || {};
             this._projectCache[projectId] = name;
           }
-        }).catch(() => {}).finally(() => {
+        }).catch(() => { }).finally(() => {
           this._projectFetching.delete(projectId);
         });
       },
@@ -9827,17 +10030,17 @@
           const isFirst = !cursor;
           const body = isFirst
             ? await this._gql(
-                'chatsHistoryPageQuery',
-                { handle: '', useBot: false },
-                '6150ca8d3d6664d4bce8cdf8a92ac5bf',
-                '1',
-                '7f7c6b3d348be34312ad66d53fd7e2b860094fa6caf6cb85321c2b2ae698d357')
+              'chatsHistoryPageQuery',
+              { handle: '', useBot: false },
+              '6150ca8d3d6664d4bce8cdf8a92ac5bf',
+              '1',
+              '7f7c6b3d348be34312ad66d53fd7e2b860094fa6caf6cb85321c2b2ae698d357')
             : await this._gql(
-                'ChatHistoryListWithMessageSearchPaginationQuery',
-                { count: 10, cursor },
-                'c7fb5dc11dde1707fb00eebe7bb04761',
-                '0',
-                '115be578cf6b1914d7139f7258325c5d1418f5e24b104bfe1d639067887974cd');
+              'ChatHistoryListWithMessageSearchPaginationQuery',
+              { count: 10, cursor },
+              'c7fb5dc11dde1707fb00eebe7bb04761',
+              '0',
+              '115be578cf6b1914d7139f7258325c5d1418f5e24b104bfe1d639067887974cd');
           const conn = body?.data?.chats;
           const edges = conn?.edges || [];
           if (!edges.length) break;
@@ -10652,16 +10855,16 @@
   // ---- i18n ----
   const LANG = (navigator.language || '').startsWith('zh') ? 'zh' : 'en';
   const TXT = {
-    exportAll:   LANG === 'zh' ? '导出全部聊天' : 'Export all chats',
+    exportAll: LANG === 'zh' ? '导出全部聊天' : 'Export all chats',
     exportSingle: LANG === 'zh' ? '导出当前对话' : 'Export this chat',
     exportProject: (name) => LANG === 'zh' ? (name ? `导出项目「${name}」` : '导出当前项目') : (name ? `Export project "${name}"` : 'Export current project'),
-    fetching:    LANG === 'zh' ? (n) => `获取列表 ${n} 条` : (n) => `Fetching ${n} chats`,
-    packing:     LANG === 'zh' ? '打包 ZIP' : 'Packing ZIP',
+    fetching: LANG === 'zh' ? (n) => `获取列表 ${n} 条` : (n) => `Fetching ${n} chats`,
+    packing: LANG === 'zh' ? '打包 ZIP' : 'Packing ZIP',
     saveAfterChat: LANG === 'zh' ? '保存到 AfterChat' : 'Save to AfterChat',
     singleOnly: LANG === 'zh' ? '请在单条对话页使用' : 'Open one chat first',
-    noNew:       LANG === 'zh' ? '没有新会话 · Shift + 单击全部导出' : 'No new chats · Shift + click for full export',
-    shiftFull:   LANG === 'zh' ? '全部导出' : 'Full export',
-    editStart:   LANG === 'zh' ? '点击修改' : 'Click to edit',
+    noNew: LANG === 'zh' ? '没有新会话 · Shift + 单击全部导出' : 'No new chats · Shift + click for full export',
+    shiftFull: LANG === 'zh' ? '全部导出' : 'Full export',
+    editStart: LANG === 'zh' ? '点击修改' : 'Click to edit',
     reportExported: (n) => LANG === 'zh' ? `已导出 ${n} 条` : `Exported ${n}`,
   };
 
@@ -10805,7 +11008,7 @@
     try {
       const stored = localStorage.getItem('chat-export-afterchat-workspace');
       if (stored && stored.trim()) return stored.trim();
-    } catch {}
+    } catch { }
     return CONFIG.AFTERCHAT_WORKSPACE || '';
   }
 
@@ -10871,8 +11074,7 @@
     const docTitle = (typeof document !== 'undefined' && document.title)
       ? document.title.replace(/\s*[-—|].*$/, '').trim()
       : '';
-    return data?.store?.rawConversationResponse?.chatName
-      || data?.chat?.name
+    return data?.chat?.name
       || data?.chatResp?.chat?.name
       || data?.conversation?.name
       || data?.conversationInfo?.downlink_body?.get_conv_info_downlink_body?.conversation_info?.name
@@ -11595,11 +11797,11 @@
     const mo = new MutationObserver(() => heal());
     const state = {
       reattach() {
-        try { mo.disconnect(); } catch {}
+        try { mo.disconnect(); } catch { }
         // 只观察两层，不扫全树：站点重建 body 子节点或替换 body 元素都能捕获，
         // 聊天流式输出的深层变更不会触发回调，避免不必要的开销。
-        try { mo.observe(document.documentElement, { childList: true, subtree: false }); } catch {}
-        try { if (document.body) mo.observe(document.body, { childList: true, subtree: false }); } catch {}
+        try { mo.observe(document.documentElement, { childList: true, subtree: false }); } catch { }
+        try { if (document.body) mo.observe(document.body, { childList: true, subtree: false }); } catch { }
       },
     };
     state.reattach();
@@ -11676,7 +11878,13 @@
       s.textContent =
         `@keyframes m365-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
 #m365-export-btn svg { width: 18px !important; height: 18px !important; max-width: none !important; }
-#m365-ring svg { width: 36px !important; height: 36px !important; max-width: none !important; }`;
+#m365-ring svg { width: 36px !important; height: 36px !important; max-width: none !important; }
+@media (max-width: 768px) {
+  #m365-export-container {
+    bottom: calc(88px + env(safe-area-inset-bottom, 0px)) !important;
+    right: 16px !important;
+  }
+}`;
       document.head.appendChild(s);
     }
 
@@ -11688,7 +11896,11 @@
         `#m365-export-tooltip .m365-start { border-bottom: 1px dashed #b0b0b0; cursor: text; font-weight: 600; }
 #m365-export-tooltip .m365-start:hover { background: #f2f2f2; }
 #m365-export-tooltip .m365-start.m365-pending { color: #8a6d00; border-bottom-color: #c9a227; }
-#m365-export-tooltip input.m365-time-input { font: 12px "Segoe Sans","Segoe UI",sans-serif; width: 158px; padding: 1px 4px; border: 1px solid #ccc; border-radius: 5px; color: #242424; background: #fff; }`;
+#m365-export-tooltip .m365-editor-wrap { display: inline-flex; align-items: center; background: #fff; border: 1px solid #ccc; border-radius: 5px; padding: 1px 3px 1px 4px; box-sizing: border-box; vertical-align: middle; transition: border-color 0.15s ease; }
+#m365-export-tooltip .m365-editor-wrap:focus-within { border-color: #0078d4; }
+#m365-export-tooltip input.m365-time-input { font: 12px "Segoe Sans","Segoe UI",sans-serif; border: none; outline: none; background: transparent; color: #242424; padding: 1px 2px; margin: 0; vertical-align: middle; box-sizing: border-box; width: 150px; }
+#m365-export-tooltip .m365-time-ok { display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; border: none; background: transparent; padding: 0; margin-left: 2px; cursor: pointer; color: #5f5f5f; border-radius: 3px; flex-shrink: 0; line-height: 1; transition: color 0.15s, background 0.15s; }
+#m365-export-tooltip .m365-time-ok:hover { color: #1a1a1a; background: rgba(0, 0, 0, 0.08); }`;
       document.head.appendChild(st);
     }
 
@@ -11780,18 +11992,39 @@
       if (!anchor || editingStart) return;
       editingStart = true;
       tooltip.textContent = '';
+
+      const wrap = document.createElement('div');
+      wrap.className = 'm365-editor-wrap';
+
       const input = document.createElement('input');
       input.type = 'datetime-local';
       input.className = 'm365-time-input';
       input.value = fmtStartInputValue(exportStartOverrideMs ?? anchor);
       input.max = fmtStartInputValue(Date.now());
-      tooltip.appendChild(input);
+
+      const okBtn = document.createElement('button');
+      okBtn.type = 'button';
+      okBtn.className = 'm365-time-ok';
+      okBtn.innerHTML = '<svg viewBox="0 0 16 16" width="13" height="13" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8.5 L6.5 12 L13 4"></path></svg>';
+      okBtn.title = LANG === 'zh' ? '确定 (Enter)' : 'Confirm (Enter)';
+
+      wrap.appendChild(input);
+      wrap.appendChild(okBtn);
+      tooltip.appendChild(wrap);
       tooltip.style.display = 'block';
       tooltip.style.pointerEvents = 'auto';
       input.focus();
 
+      let cleanedUp = false;
+      const cleanupListeners = () => {
+        if (cleanedUp) return;
+        cleanedUp = true;
+        document.removeEventListener('pointerdown', onDocPointerDown, true);
+      };
+
       const finalize = (apply) => {
         if (!editingStart) return;
+        cleanupListeners();
         if (apply) {
           const ms = parseStartInput(input.value);
           if (ms !== null) exportStartOverrideMs = ms;
@@ -11801,10 +12034,31 @@
         else tooltip.textContent = '';
         if (!hoverInside) tooltip.style.display = 'none';
       };
-      input.addEventListener('change', () => finalize(true));
-      input.addEventListener('blur', () => finalize(true));
+
+      const onDocPointerDown = (ev) => {
+        if (tooltip.contains(ev.target)) return;
+        finalize(true);
+      };
+
+      setTimeout(() => {
+        if (editingStart) {
+          document.addEventListener('pointerdown', onDocPointerDown, true);
+        }
+      }, 50);
+
+      okBtn.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        finalize(true);
+      });
+
       input.addEventListener('keydown', (ev) => {
-        if (ev.key === 'Escape') finalize(false);   // 取消本次修改
+        if (ev.key === 'Enter') {
+          ev.preventDefault();
+          finalize(true);
+        } else if (ev.key === 'Escape') {
+          ev.preventDefault();
+          finalize(false);
+        }
       });
     }
 
@@ -11868,7 +12122,7 @@
     }
   }
 
-  try { initialize(); } catch {}
+  try { initialize(); } catch { }
 
   // 导出给 Bun 测试（浏览器下 module 不存在，无副作用）
   if (typeof module !== 'undefined' && module.exports) {
