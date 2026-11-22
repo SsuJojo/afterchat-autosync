@@ -13,6 +13,7 @@
 *.log
 /afterchat-autosync.user.js
 /dist/
+/extension/patched.user.js
 
 # OS noise
 Thumbs.db

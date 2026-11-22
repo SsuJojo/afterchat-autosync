@@ -49,9 +49,21 @@ C:\Users\SsuJo_\Documents\GitHub\afterchat-autosync\
 
 AfterChat 油猴脚本加了常驻同步模块：打开**任意 29 个已适配站点**就把「上次同步之后」的新对话直接写进 `_sync\<平台>\`，不再下载 zip、不进 Downloads。浏览器不开就不同步；deja 12:30 / 22:30 两班索引兜底。
 
+### 推荐：MV3 扩展（一次选目录 + 控制台）
+
+- **构建 / 加载**：`python -X utf8 tools/patch_afterchat.py --version-tag ac6` 生成 `dist\afterchat-autosync.user.js`，再 `python -X utf8 tools/build_extension.py --sync-version` 同步 manifest 版本并复制成 `extension\patched.user.js`。在 Edge / Chrome 的 `edge://extensions` / `chrome://extensions` 打开开发者模式 → 加载已解压的扩展 → 选 `extension\` 目录。扩展没打包上架，本地加载即可。
+- **首次使用**：点工具栏扩展图标 → 控制台里「选择/更换目录」→ 打开或刷新任意已适配站点，在 `⇅` 面板点「开启自动同步」。目录句柄存在**扩展自己的** IndexedDB（`acSyncExtDb/handles/root`），29 个站点共用同一个，不再逐站重选。
+- **控制台**：工具栏图标打开，显示当前目录、「最近聊天」（平台 / 时间 / 标题，点一行看前 200 行对话内容）与各平台文件数、待处理数，15 秒自动刷新。只读查看，刻意不做「一键全开」。
+- **为什么扩展能做到**：`showDirectoryPicker` 只在扩展页面里由手势调用，句柄存在扩展源；站点的 MAIN-world 内容脚本注入同一份 patched bundle，ISOLATED-world 桥把文件操作转发给后台服务 worker。浏览器仍然禁止跨源直接传句柄，但同源扩展内部共享是合规路径。
+- **不要双开**：扩展与油猴里的同名 AfterChat 脚本二选一；同时装会出现两套 UI 和两个调度器。
+
+### 油猴脚本（兼容保留）
+
 - **安装 / 升级**：直接从 GitHub Releases 安装 `afterchat-autosync.user.js`。产物已写 `@updateURL` / `@downloadURL` 指向 latest Release；CI 每 3 小时跟随上游 AfterChat，发现新版自动构建并发 Release，Tampermonkey 通常会在之后自动升级。若要本地构建：`python tools/patch_afterchat.py` 会用 `vendor/afterchat.user.js` + `tools/ac-sync.module.js` 生成 `dist/afterchat-autosync.user.js`（在 `try { initialize(); }` 注入口前注入，同名同 namespace，可直接覆盖旧脚本槽位）。
-- **首次启用**：在任意支持站点点右下角导出按钮左侧的 `⇅` 小圆钮 → 面板里「开启自动同步」→ 选目录。建议选一个空目录（首次先手工建好）；多人共用一台机器可各自选别的目录。每个平台在所选目录下建 `<平台>\` 与 `<平台>\_failed\`。换目录用面板里「更换目录」，锚点保留、文件同名覆盖，不会重导。
-- **权限**：选目录时浏览器授予一次；重启浏览器后可能需要再点 `⇅` → 「立即同步」完成一次授权（浏览器要求手势，脚本不会自动弹窗）。
+- **首次启用**：在任意支持站点点右下角导出按钮左侧的 `⇅` 小圆钮 → 面板里「开启自动同步」→ 选目录。建议选一个空目录（首次先手工建好）；多人共用一台机器可各自选别的目录。每个平台在所选目录下建 `<平台>\` 与 `<平台>\_failed\`。
+- **少选一次目录（同站点复用）**：目录句柄存在本站点浏览器里（IndexedDB）。同一站点再次点「开启自动同步」会直接复用已选目录，**不再弹目录选择器**；面板里的「选择目录」也是复用优先（无存档或复用失败才弹选择器），「更换目录」则总是弹选择器换到别的目录。选择器带固定 `id`（`ac-sync-root`），浏览器会记住该站点上次所选目录，下次选择默认停在原处。锚点保留、文件同名覆盖，重绑不会重导。
+- **跨站限制（仅油猴模式，浏览器规则，绕不开）**：目录句柄按站点隔离，浏览器不允许跨域名传递或复用——在 ChatGPT 站选过的目录，Grok / Gemini 站仍要各选一次（29 个站点各选一次）。这不是脚本偷懒：File System Access 的句柄和 `showDirectoryPicker({ id })` 的记忆都是按源（origin）保存的，跨站 `postMessage` 传句柄会被浏览器拒绝，权限请求也要求同源页+用户手势。要真正做到「全站只选一次」+ 控制台，用上面的 MV3 扩展。重选时默认停在上次目录，只需点一下确认，已经把操作压到最少。
+- **权限**：选目录时浏览器授予一次；重启浏览器后可能需要再点 `⇅` → 「立即同步」完成一次授权（浏览器要求手势，脚本不会自动弹窗）。部分 Chrome/Edge 版本在授权时勾选「每次访问都允许」，可省掉重启后的再次授权。
 - **触发时机**：脚本启动 15 秒跑一轮，之后每 10 分钟一轮，从别的标签切回页面也触发（60 秒防抖）；后台页不跑。连续失败会退避，单飞锁防止并发。
 - **平台范围（29 个，全部默认开启）**：M365 Copilot、Microsoft Copilot、腾讯 ima、Z.ai、智谱清言、DuckDuckGo、Perplexity、DeepSeek、通义千问、千问、腾讯元宝、腾讯混元、Kimi、豆包/Dola、MiniMax Agent、Google AI Studio、ChatGPT、Grok(x.com)、Grok Web、Gemini、Google AI Mode、Arena、Mistral、Sakana、Claude、Poe、Monica、StepFun Studio、StepFun Chat。要缩减范围就在同步模块的 `AC_SYNC_PLATFORMS` 数组里删对应 id。
 - **只读导出**：只读取网页对话并写 `_sync` 文件，不会在网站上创建或修改任何对话。
@@ -60,7 +72,7 @@ AfterChat 油猴脚本加了常驻同步模块：打开**任意 29 个已适配�
 
 ## CI / 自动更新
 
-- `version.json` 记录上游版本和本仓发布版本（如 `1.24.1-ac2`）；`vendor/afterchat.user.js` 是可复现构建的上游快照。
+- `version.json` 记录上游版本和本仓发布版本（如 `1.24.1-ac6`）；`vendor/afterchat.user.js` 是可复现构建的上游快照。
 - GitHub Actions：`upstream` 工作流每 3 小时拉取 AfterChat 上游 raw 快照比对；上游版本或内容有变化就更新 `vendor/` 快照、升发布版本、推 commit 并打 `v*` tag，由 `release` 工作流构建、校验并创建 Release。推 tag 或手动触发也能构建发版。
 - Release 里固定资产名 `afterchat-autosync.user.js`，因此 userscript 的 `@updateURL` / `@downloadURL` 可用 latest-release 稳定地址自动升级。
 - 本地校验：`python tools/verify_autosync.py --base .`。

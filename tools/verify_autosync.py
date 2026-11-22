@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """静态验收：AfterChat AutoSync 交付物。不联网、不改文件。"""
 import argparse
+import json
 import os
 import re
 import sys
@@ -16,8 +17,17 @@ TOOLS = os.path.join(BASE, "tools")
 MODULE = os.path.join(TOOLS, "ac-sync.module.js")
 PATCH = os.path.join(TOOLS, "patch_afterchat.py")
 OUT = os.path.join(BASE, "dist", "afterchat-autosync.user.js")
+BUILD_EXT = os.path.join(TOOLS, "build_extension.py")
+EXT_DIR = os.path.join(BASE, "extension")
+EXT_MANIFEST = os.path.join(EXT_DIR, "manifest.json")
+EXT_BACKGROUND = os.path.join(EXT_DIR, "background.js")
+EXT_PAGE_BRIDGE = os.path.join(EXT_DIR, "page-bridge.js")
+EXT_CONTENT_BRIDGE = os.path.join(EXT_DIR, "content-bridge.js")
+EXT_BUNDLE = os.path.join(EXT_DIR, "patched.user.js")
+EXT_CONSOLE = os.path.join(EXT_DIR, "console.html")
 CONVERTER = os.path.join(BASE, "chat2deja.py")
 README = os.path.join(BASE, "README.md")
+VERSION_FILE = os.path.join(BASE, "version.json")
 
 failed = []
 
@@ -76,6 +86,14 @@ if mod:
         r"AC_SYNC_BOOT_DELAY\s*=\s*15\s*\*\s*1000", mod)))
     check("module: single-flight lock", bool(re.search(r"syncing|inFlight|running", mod, re.I)))
     check("module: diagnostics hook", "__AC_SYNC__" in mod)
+    check("module: stable picker id",
+          "AC_SYNC_PICKER_ID" in mod and "showDirectoryPicker({ id: AC_SYNC_PICKER_ID" in mod)
+    check("module: explicit select-directory action", "acSyncSelectDirectory" in mod and "选择目录" in mod)
+    check("module: enable accepts reusable handle", "async function acSyncEnableSync(handle)" in mod)
+    check("module: rebind forces fresh picker", bool(re.search(
+        r"async function acSyncChangeDirectory\(\)[\s\S]{0,200}acSyncPickDirectory", mod)))
+    check("module: extension bridge fallback", "acSyncExtCall" in mod and "acSyncExtensionMode" in mod)
+    check("module: extension root refresh", "acSyncRefreshExtRoot" in mod and "__acSyncExtRootChanged" in mod)
 
 patch = text(PATCH) or ""
 if patch:
@@ -107,6 +125,7 @@ if rd:
     check("README: optional directory", "选目录" in rd or "自选" in rd)
     check("README: no daily Downloads scan", "--with-downloads" in rd)
     check("README: all-platform scope", "29 个" in rd and "全面" in rd)
+    check("README: extension console", "MV3 扩展" in rd and "控制台" in rd)
 
 if os.path.isfile(OUT):
     out = text(OUT) or ""
@@ -115,8 +134,55 @@ if os.path.isfile(OUT):
     check("built: version suffix", bool(re.search(r"// @version\s+\S+-ac\d+", out)))
     check("built: auto update metadata", "@updateURL" in out and "@downloadURL" in out)
     check("built: contains module", "showDirectoryPicker" in out)
+    check("built: stable picker id", "AC_SYNC_PICKER_ID" in out)
 else:
     print("SKIP built userscript checks (not generated yet)")
+
+# ---- MV3 extension ----
+if os.path.isfile(BUILD_EXT):
+    be = text(BUILD_EXT) or ""
+    check("extension: build script", "build_extension.py" in be and "--check" in be)
+
+for label, path in (
+    ("manifest", EXT_MANIFEST),
+    ("background", EXT_BACKGROUND),
+    ("page bridge", EXT_PAGE_BRIDGE),
+    ("content bridge", EXT_CONTENT_BRIDGE),
+    ("console", EXT_CONSOLE),
+):
+    check("extension: " + label + " exists", os.path.isfile(path))
+
+if os.path.isfile(EXT_MANIFEST):
+    mf = text(EXT_MANIFEST) or ""
+    try:
+        m = json.loads(mf)
+        check("extension: MV3", m.get("manifest_version") == 3)
+        try:
+            release = json.loads(text(VERSION_FILE) or "{}").get("release")
+        except Exception:
+            release = None
+        check("extension: version matches version.json", m.get("version") == release,
+              f"manifest={m.get('version')} version.json={release}")
+        check("extension: MAIN world bridge", any(
+            s.get("world") == "MAIN" and s.get("js") == ["page-bridge.js"]
+            for s in m.get("content_scripts", [])))
+        check("extension: MAIN world bundle", any(
+            s.get("world") == "MAIN" and s.get("js") == ["patched.user.js"]
+            for s in m.get("content_scripts", [])))
+        check("extension: 29 host permissions", len(m.get("host_permissions", [])) >= 29)
+    except Exception as e:
+        check("extension: manifest parses", False, str(e))
+
+for label, path, needles in (
+    ("background holds handle", EXT_BACKGROUND, ("acSyncExtDb", "getRoot", "createWritable", "listChats")),
+    ("page bridge API", EXT_PAGE_BRIDGE, ("__AC_SYNC_EXT_CALL__", "__acSyncExtReq")),
+    ("content bridge relay", EXT_CONTENT_BRIDGE, ("chrome.runtime.sendMessage", "__acSyncExtRootChanged")),
+):
+    body = text(path) or ""
+    check("extension: " + label, all(n in body for n in needles))
+
+if os.path.isfile(OUT) and os.path.isfile(EXT_BUNDLE):
+    check("extension: bundle matches dist", text(EXT_BUNDLE) == text(OUT))
 
 print("\n%d check(s) failed" % len(failed))
 sys.exit(1 if failed else 0)

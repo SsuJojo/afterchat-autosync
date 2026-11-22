@@ -56,17 +56,31 @@ jobs:
             --out dist/afterchat-autosync.user.js \
             --version-tag "${{ steps.version.outputs.suffix }}"
 
-      - name: Verify userscript
+      - name: Build MV3 extension
+        run: |
+          python -X utf8 tools/build_extension.py --sync-version
+          python -X utf8 -m zipfile -c \
+            "afterchat-autosync-extension-${{ steps.version.outputs.version }}.zip" extension
+
+      - name: Verify userscript and extension
         run: |
           python tools/patch_afterchat.py --check --out dist/afterchat-autosync.user.js
+          python -X utf8 tools/build_extension.py --check
           python tools/verify_autosync.py --base .
           node --check dist/afterchat-autosync.user.js
+          node --check tools/ac-sync.module.js
+          node --check extension/background.js
+          node --check extension/console.js
+          node --check extension/content-bridge.js
+          node --check extension/page-bridge.js
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
           name: afterchat-autosync-${{ steps.version.outputs.version }}
-          path: dist/afterchat-autosync.user.js
+          path: |
+            dist/afterchat-autosync.user.js
+            afterchat-autosync-extension-${{ steps.version.outputs.version }}.zip
           if-no-files-found: error
 
       - name: Create release
@@ -76,5 +90,6 @@ jobs:
         run: |
           gh release create "${{ steps.version.outputs.tag }}" \
             dist/afterchat-autosync.user.js \
+            "afterchat-autosync-extension-${{ steps.version.outputs.version }}.zip" \
             --title "AfterChat AutoSync ${{ steps.version.outputs.version }}" \
-            --notes "Automated build from ${{ github.sha }}."
+            --notes "Automated build from ${{ github.sha }}. Includes userscript and MV3 extension."
